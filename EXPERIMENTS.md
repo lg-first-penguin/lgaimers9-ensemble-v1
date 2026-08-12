@@ -367,3 +367,56 @@ Classifier 기준선(521.88) 대비 **+146.06(+28%)** 개선 — RandomForestCla
 단독 성능을 521.88→667.94로 28% 끌어올렸음에도(상관관계는 0.83→0.87로 소폭만 상승, 여전히 네 후보 중 가장 낮은 축) 3-way 스태킹은 여전히 애매함 — 단일분할로는 근소한 플러스(+1.3~1.5)지만 rolling-origin 평균은 마이너스(-2.75~-2.93), 2/3 fold는 이겨도 5~6월의 손해가 나머지 이득을 상쇄. §13.1의 소표본 아티팩트를 감안하더라도(5~6월 fold 자체가 과장된 수치일 수 있음) 순이득이라고 부르기엔 여전히 근거가 얇음.
 
 **결론**: RandomForest 자체 성능은 실제로 크게 개선 가능했다(objective 교체가 핵심 레버였음, "용량을 늘린다"는 직관적인 방향은 오히려 틀렸음). 하지만 그 개선이 3-way 스태킹을 채택 기준 위로 끌어올릴 만큼 크지는 않았다 — §12의 "프로덕션 미채택, 보류" 결론 유지. `RandomForestRegressor` 기반 구현은 참고용으로만 남기고 `code/randomforest_model.py`(Classifier 버전)는 변경하지 않음.
+
+## 14. CatBoost/MLP 개별 성능 개선 시도 — 트랙맨 매칭 세분화, 파생 피처, loss function 교체 (모두 실패)
+
+3번째 모델 추가가 §12~§13에서 보류로 마무리된 뒤, "새 모델을 추가하는 대신 기존 CatBoost/MLP 각각의 성능을 먼저 올려보자"는 방향으로 5개 후보를 검증. 스크리닝은 속도를 위해 CatBoost 단독(season==2024 홀드아웃, baseline 818.54) 또는 MLP 단독(3-seed 평균, `open/temp/experiment_stack3`에 캐시된 동일 split 재사용)으로 진행.
+
+### 14.1 트랙맨 매칭 지문(fingerprint) coarsening — 세분화가 이미 최적, coarsening은 전부 손해
+
+현재 `process_trackman_features_safe`의 매칭 지문은 10개 컬럼 조합(`match_cols`)이라 카디널리티가 매우 높고, 지문+`pitch_type_group` 조합당 트랙맨 매칭 건수 중앙값이 1건(평균 2.06)에 불과함을 확인했다. 언뜻 "표본 부족 → 노이즈"로 보이지만, 이는 선수 ID 조인이 애초에 불가능한 상황(`pitcher_id`/`batter_id`와 트랙맨의 `pitcher_trackman_id`/`batter_trackman_id`는 서로 다른 익명화 공간이라 값 범위조차 겹치지 않음 — 20만 행 샘플에서 overlap 0건 확인)에서 최대한 비슷한 상황의 과거 투구를 찾아 근사하려는 **의도적 설계**일 수 있다. 즉 bias(세분화 시 낮음)-variance(세분화 시 높음) 트레이드오프이지 확정된 버그가 아니므로, 이를 "고쳐야 할 문제"로 단정하지 않고 coarsening 3단계를 baseline과 나란히 CatBoost로 비교했다:
+
+| variant | 지문+구종군당 median n | Val Score | delta |
+| --- | --- | --- | --- |
+| baseline(현재, 세분화) | 1 | **818.54** | +0.00 |
+| `game_dayofweek` 제거 | 4 | 699.73 | -118.81 |
+| +`inning` 제거 | 20 | 691.38 | -127.16 |
+| +`game_month` 제거 | 138 | 659.97 | -158.57 |
+
+coarsening은 표본 안정성을 확실히 높였음에도(median 1→138) 전부 큰 폭으로 손해를 봤다 — 세분화된 "근접 매칭"이 실제로 유효한 신호였고, coarsening은 그 신호를 뭉개기만 했다. 현재 설계가 이미 이 축에서는 최적에 가까움. **결론: 매칭 지문 변경 없음, 현행 유지.**
+
+### 14.2 `asof_batter_*` 강화 / pitch-mix × 상황 교차 피처 — 둘 다 손해
+
+투수 쪽(`pitcher_relative_success`, `pitcher_trend`, `pitcher_consistency` 등)에 비해 타자 쪽 파생 피처가 `matchup` 하나뿐으로 상대적으로 빈약하다는 점에 착안해 두 묶음을 각각 CatBoost로 테스트했다:
+
+- **배터 강화** (`batter_relative_success`, `batter_relative_middle`, `batter_experience_log`, `pitcher_experience_log`, `matchup_confidence`, `batter_pressure`, `batter_middle_vs_pitcher_middle`, 7개 추가): 774.64 (**-43.89**)
+- **pitch-mix 교차** (`pitchmix_confidence`, `fastball_pressure`, `breaking_fullcount`, `offspeed_ahead`, `mix_entropy`, `fastball_rate_x_situational_speed`, `breaking_rate_x_situational_break`, 7개 추가): 779.48 (**-39.06**)
+
+두 경우 모두 개별 feature importance는 0.2~1.7 수준으로 "쓰이긴" 했지만(CatBoost `PredictionValuesChange` 기준), 순효과는 마이너스였다. 공통적으로 `best_iteration`이 519 → 430 전후로 앞당겨지는 패턴이 두 실험 모두에서 반복됐다. 원인으로 의심되는 것: (a) `batter_relative_success` 등 일부는 기존 피처의 단조변환(상수를 빼거나 곱하기만 함)이라 트리 분할 관점에서 새 정보가 거의 없고, (b) CatBoost가 `random_strength≈3.7`(123개 피처 기준으로 Optuna 튜닝된 값)로 분할 후보 선택에 무작위성을 주입하는데, 정보 없는 중복 피처가 늘어나면 분할 후보 풀이 희석되어 좋은 분할이 상대적으로 덜 뽑힐 수 있다. 이 가설을 확인하려고 단조변환 피처 1개만 추가하는 대조군 실험(`feat_control_single.py`)을 준비했으나 실행 직전 작업 방향이 바뀌어 미실시 — 메커니즘은 확정하지 못했지만, 두 후보 모두 결과가 이미 명확히 마이너스라 어차피 **채택하지 않는다.**
+
+### 14.3 loss function을 Brier(MSE)로 교체 — MLP는 노이즈 이내, CatBoost는 손해
+
+§13.2에서 RandomForest가 objective를 Gini/log_loss에서 Brier와 수학적으로 동일한 MSE(`RandomForestRegressor`)로 바꿔 크게 개선됐던 것에 착안해, CatBoost(`Logloss`→`RMSE`)와 MLP(`BCELoss`→`MSELoss`)에도 같은 아이디어를 적용해봤다.
+
+**MLP** (단일모델, seed 3개[42, 123, 7] 평균):
+
+| config | seed별 Val Score | 평균 |
+| --- | --- | --- |
+| baseline(`BCELoss`, `base_state` embed_dim=5) | 677.93 / 678.83 / 693.45 | 683.40 |
+| `MSELoss`(embed_dim=5) | 708.87 / 652.28 / 683.11 | 681.42 (**-1.98**) |
+| `BCELoss`, `base_state` embed_dim=8(카디널리티 8에 맞춰 확장) | 700.18 / 673.50 / 691.48 | 688.39 (**+4.99**) |
+
+두 변화 모두 config 내부의 시드 간 변동폭(최대 56점)보다 작아 노이즈 수준이다 — 단일 MLP는 원래 epoch/시드에 따라 편차가 크다는 게 이미 알려진 사실(§6.4, 500~740점대). `base_state`는 카디널리티가 8뿐이라 기존 embed_dim=5로도 8개 범주를 선형독립적으로 표현하기엔 이미 충분한 용량일 가능성이 높고, 이후 MLP 레이어가 임베딩+수치형을 비선형으로 결합하므로 병목이 embed_dim 자체는 아닐 수 있다 — 다만 3-seed 스크리닝만으로는 결론을 내리기엔 검정력이 약하다. 둘 다 뚜렷한 방향성이 없는 상태라 7-seed 풀 앙상블 재검증 비용을 들일 근거가 부족해 여기서 중단.
+
+**CatBoost** (`loss_function`만 `RMSE`로 교체, `eval_metric`도 `RMSE`로 맞춤 — 나머지 하이퍼파라미터 동일):
+
+| loss | Val Score | delta |
+| --- | --- | --- |
+| `Logloss`(baseline) | 818.54 | +0.00 |
+| `RMSE`(Brier와 수학적으로 동일) | 782.57 | **-35.97** |
+
+RandomForest와 정반대 결과다. RandomForest는 배깅이라 그래디언트 없이 노드별 불순도 감소만 보고 트리를 독립적으로 키우므로, "불순도 기준(Gini)"과 "평가지표(Brier)"의 정합성 자체가 목적함수 선택의 전부였다. 반면 CatBoost/GBDT는 그래디언트 기반 최적화이고, 이진 분류에서 `Logloss`(cross-entropy)는 예측이 정답에서 멀수록(확률이 극단으로 틀릴수록) 그래디언트가 커지는 반면 squared error(MSE/Brier)는 같은 상황에서 그래디언트가 오히려 평탄해지는 구간이 있어(0/1 근처) 최적화 지형이 더 나쁘다 — 로지스틱 회귀류가 확률 보정이 최종 목표여도 log-loss로 학습하는 이유이기도 하다. 이 프로젝트는 이미 `eval_metric="BrierScore"`로 early stopping은 Brier 기준으로 하면서 `loss_function="Logloss"`로 학습해 두 장점을 모두 취하고 있었던 셈이다. **결론: 현행 유지, 변경 없음.**
+
+### 14.4 종합
+
+이번 라운드에서 시도한 5개 후보(트랙맨 coarsening 3단계, 배터 강화, pitch-mix 교차, MLP loss/embedding 2종, CatBoost RMSE loss) 전부 baseline을 넘지 못했다. §12~§13(3번째 모델 추가)에 이어 이번에도 "직관적으로 그럴듯한 방향"이 실측에서는 대부분 손해였다 — 이 프로젝트의 CatBoost/MLP 조합은 이미 상당히 성숙한 로컬 최적점 근방에 있는 것으로 보인다. `TABULAR_MLP_REPORT.md` §9의 "트랙맨 피처 고도화" 항목은 이번 실험으로 종결하고, "수치형 피처 임베딩(periodic/quantile embedding)"은 여전히 미시도 상태로 남긴다.
