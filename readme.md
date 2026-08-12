@@ -23,6 +23,7 @@ Codename:       noble
 
   python 3.11,
 
+  "torch==2.7.1+cu128" \
   "pandas==2.0.3" \
   "numpy==1.26.4" \
   "scipy==1.15.3" \
@@ -86,16 +87,16 @@ cd lgaimers9
 
 ## <주의사항>
 
-- ai 시킨거라 catboost로 했을 때 한 번 돌아가는 것만 확인해봤습니다.
+- (v2) CatBoost에서 PyTorch 기반 Tabular MLP(+ 7-seed 앙상블)로 모델을 교체했습니다. 처음엔 코랩에서 간단한 피처셋으로 1,000점대가 나와서 전환했으나, 그 1,000점은 코랩 코드의 무작위 20% 분할 폴백(의도한 `season==2024` 홀드아웃이 아님)으로 인한 선수-정체성 리크로 밝혀져 무효였습니다. 실제 파이프라인(트랙맨 병합 + 파생 피처 + `season==2024` 홀드아웃)으로 재검증한 실측 점수는 **CatBoost 818.54 vs. MLP 7-seed 앙상블 789.58**로, MLP가 CatBoost를 아직 넘지 못했습니다. 자세한 튜닝 과정(임베딩 실패 사례, 앙상블 도입 등)은 `EXPERIMENTS.md` 6장 참고. 그럼에도 MLP 전환의 이점(속도/구조 단순함)을 유지하기로 팀에서 결정해 MLP를 계속 사용 중입니다 — 수료 기준(549.51)은 여유 있게 통과.
 
 - open/data/ 아래 직접 데이터 다운받아서 넣어주셔야 합니다. (아래 대회 데이터다운링크)
 > https://dacon.io/competitions/official/236743/data
 
-- 본 파이프라인은 CatBoost 기준으로 만들었습니다. 하지만 확장성을 고려해서 만들어라고 제미나이 시키긴 했습니다. 
-> 검증은 안해봤습니다.
+- `open/reference/best_model.pkl`에 예전 CatBoost 모델이 남아있어도 문제 없습니다. `code/test.py`가 포맷이 다르면 자동으로 무시하고, `dopip.py`를 한 번 돌리면 새 MLP 모델로 자동 교체되면서 예전 파일은 `open/former_model/`로 백업됩니다.
 
-- `iteration` 횟수가 하드웨어따라 너무 버거울 수도 있습니다. 직접 알맞게 줄이시면 되겠습니다.
-> 지금 기본 코드로 넣어둔게 아마 400번 정도 돌 겁니다.
+- 모델 구조/하이퍼파라미터는 `code/mlp_model.py`에 있습니다 (`TabularMLP` 클래스, epoch/batch size/lr 등). `submit/script.py`는 `code/`를 import하지 않는 독립 실행 파일이라 `TabularMLP` 클래스와 전처리 로직이 그대로 복제되어 있습니다 — `mlp_model.py`를 고치면 `submit/script.py`도 손으로 맞춰줘야 합니다.
+
+- epoch 수(`code/mlp_model.py`의 `MAX_EPOCHS`, `PATIENCE`)가 하드웨어따라 너무 버거울 수도 있습니다. 직접 알맞게 줄이시면 되겠습니다.
 
 ## <코드 설명>
 

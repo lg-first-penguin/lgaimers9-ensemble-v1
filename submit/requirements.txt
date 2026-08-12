@@ -1,1 +1,8 @@
-catboost==1.2.5
+# torch, pandas, numpy, scikit-learn은 대회 평가 서버에 기본 설치되어 있으므로(CLAUDE.md 참고)
+# 여기에는 별도 명시하지 않습니다. 평가 서버 기본 버전과 충돌할 수 있으므로 임의로 버전을
+# 고정해 추가하지 마세요.
+#
+# catboost는 CatBoost+MLP 블렌드(TABULAR_MLP_REPORT.md 참고)에 필요하며 평가 서버에
+# 기본 설치되어 있지 않으므로 명시적으로 pin합니다 (학습에 쓴 로컬 버전과 동일하게 고정
+# — 서로 다른 버전 간 pickle 호환성 문제를 피하기 위함).
+catboost==1.2.10

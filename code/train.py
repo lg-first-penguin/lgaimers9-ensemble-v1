@@ -12,13 +12,16 @@ if parent_dir not in sys.path:
 import pickle
 import numpy as np
 import pandas as pd
-from catboost import CatBoostClassifier, Pool
+
+from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, embed_dim_for_cardinality, fit_preprocessing, apply_preprocessing, to_tensors, train_ensemble, make_bundle, predict_bundle, get_device
+from code.catboost_model import train_catboost, predict_catboost
+from code.blend_model import sweep_alpha, make_blend_bundle
 
 def process_trackman_features_safe(df_main, df_trm, is_train_split=True):
     """타임 리크가 차단된 10-Key 상황 지문 기반 트랙맨 전처리 결합 엔진"""
     df_main_copy = df_main.copy()
     df_trm_copy = df_trm.copy()
-    
+
     if is_train_split:
         max_season = df_main_copy['season'].max()
         max_month = df_main_copy[df_main_copy['season'] == max_season]['game_month'].max()
@@ -26,36 +29,36 @@ def process_trackman_features_safe(df_main, df_trm, is_train_split=True):
                       ((df_trm_copy['season'] == max_season) & (df_trm_copy['game_month'] > max_month))
         df_trm_copy = df_trm_copy[~future_mask].reset_index(drop=True)
         print(f"⏳ [Time Filter] {max_season}년 {max_month}월 이전의 트랙맨 데이터만 잘라내어 피처를 산출합니다.")
-    
+
     match_cols = [dfc for dfc in df_main_copy.columns if (dfc in df_trm_copy.columns) and dfc != 'row_id']
-    
+
     grouped = df_trm_copy.groupby(match_cols + ['pitch_type_group', 'auto_pitch_type'])
     grouped_phase1 = grouped[['rel_speed', 'spin_rate', 'induced_vert_break', 'horz_break', 'extension', 'rel_height', 'rel_side', 'zone_speed']].agg(['mean', 'std'])
     grouped_phase2 = grouped_phase1.reset_index()
-    
+
     std_cols = [col for col in grouped_phase2.columns if 'std' in col]
     grouped_phase2[std_cols] = grouped_phase2[std_cols].fillna(0)
     grouped_phase2.columns = ['_'.join(col).strip('_') for col in grouped_phase2.columns]
-    
+
     grouped_phase3 = grouped_phase2.drop(columns='auto_pitch_type')
     grouped_phase3 = grouped_phase3.groupby(match_cols + ['pitch_type_group']).agg(['mean'])
-    
+
     pivoted = grouped_phase3.unstack(level='pitch_type_group')
     pivoted.columns = [f"{col[0]}_{col[1]}_{col[2]}" for col in pivoted.columns]
     tm_final = pivoted.reset_index()
     tm_final = tm_final.fillna(0)
-    
+
     df_main_copy['top_bottom'] = df_main_copy['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
     tm_final['top_bottom'] = tm_final['top_bottom'].map({'Top': 0, 'Bottom': 1}).astype(np.int64)
-    
+
     for col in ['batter_hand', 'pitcher_hand']:
         if col in tm_final.columns:
             tm_final[col] = tm_final[col].map({'Left': 1, 'Right': 2}).astype(np.int64)
-            
+
     tr_final = pd.merge(df_main_copy, tm_final, on=match_cols, how='left')
     new_feature_cols = [col for col in tm_final.columns if col not in match_cols]
     tr_final[new_feature_cols] = tr_final[new_feature_cols].fillna(tr_final[new_feature_cols].mean())
-    
+
     return tr_final, match_cols
 
 def add_engineered_features(df, league_success_mean):
@@ -90,13 +93,13 @@ def add_engineered_features(df, league_success_mean):
 
 def main():
     DATA_DIR = "./open/data"
+    target_col = 'control_success'
     df = pd.read_csv(os.path.join(DATA_DIR, "train.csv"))
     df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"))
-    
+
     tr_final, match_cols = process_trackman_features_safe(df, df_trm, is_train_split=True)
-    
-    train_df = tr_final.dropna(subset=['control_success']).reset_index(drop=True)
-    target_col = 'control_success'
+
+    train_df = tr_final.dropna(subset=[target_col]).reset_index(drop=True)
 
     train_mask = train_df['season'] < 2024
     val_mask = train_df['season'] == 2024
@@ -106,40 +109,53 @@ def main():
 
     drop_cols = ['row_id', target_col]
     features = [col for col in train_df.columns if col not in drop_cols]
+    num_cols = [c for c in features if c not in CAT_COLS]
 
-    categorical_features = [col_cat for col_cat in tr_final.select_dtypes(include='object').columns if col_cat != 'row_id' and col_cat in features]
+    train_split = train_df.loc[train_mask, features + [target_col]].reset_index(drop=True)
+    val_split = train_df.loc[val_mask, features + [target_col]].reset_index(drop=True)
+    print(f"훈련 데이터 (2019~2023): {len(train_split)} 행 | 검증 데이터 (2024): {len(val_split)} 행")
 
-    for col in categorical_features:
-        train_df[col] = train_df[col].astype(str).fillna('missing')
+    train_proc, cat_encoder, num_imputer, num_scaler, cat_dims = fit_preprocessing(train_split, CAT_COLS, num_cols)
+    val_proc = apply_preprocessing(val_split, CAT_COLS, num_cols, cat_encoder, num_imputer, num_scaler)
 
-    X_train, y_train = train_df.loc[train_mask, features], train_df.loc[train_mask, target_col]
-    X_val, y_val = train_df.loc[val_mask, features], train_df.loc[val_mask, target_col]
-    
-    train_pool = Pool(data=X_train, label=y_train, cat_features=categorical_features)
-    val_pool = Pool(data=X_val, label=y_val, cat_features=categorical_features)
-    
-    model = CatBoostClassifier(
-        iterations=1500,
-        learning_rate=0.05040411253232039,
-        depth=7,
-        l2_leaf_reg=3.14659036827521,
-        random_strength=3.715568024268865,
-        bagging_temperature=0.4609270457436248,
-        border_count=106,
-        min_data_in_leaf=81,
-        bootstrap_type='Bayesian',
-        loss_function='Logloss',
-        eval_metric='BrierScore',
-        random_seed=42,
-        early_stopping_rounds=50,
-        verbose=100,
+    X_tr_cat, X_tr_num, y_tr = to_tensors(train_proc, CAT_COLS, num_cols, target_col)
+    X_val_cat, X_val_num, y_val_t = to_tensors(val_proc, CAT_COLS, num_cols, target_col)
+    y_val_np = val_proc[target_col].values
+
+    device = get_device()
+    print(f"[Device] {device}")
+
+    embed_dims = [embed_dim_for_cardinality(d) for d in cat_dims]
+    members = train_ensemble(
+        X_tr_cat, X_tr_num, y_tr,
+        cat_dims=cat_dims, num_numeric_feats=len(num_cols), embed_dims=embed_dims,
+        X_val_cat=X_val_cat, X_val_num=X_val_num, y_val=y_val_np,
+        seeds=ENSEMBLE_SEEDS, device=device,
     )
-    model.fit(train_pool, eval_set=val_pool, use_best_model=True)
-    
+
+    mlp_bundle = make_bundle(
+        members, CAT_COLS, num_cols, cat_dims, embed_dims,
+        cat_encoder, num_imputer, num_scaler,
+    )
+
+    print("\n--- [CatBoost] 블렌딩용 CatBoost 모델 학습 ---")
+    X_train_raw, y_train_raw = train_split[features], train_split[target_col].values
+    X_val_raw, y_val_raw = val_split[features], val_split[target_col].values
+    catboost_model, catboost_best_iteration = train_catboost(X_train_raw, y_train_raw, X_val_raw, y_val_raw, verbose=True)
+    print(f"[CatBoost] 학습 완료 (best_iteration={catboost_best_iteration})")
+
+    mlp_val_preds = predict_bundle(mlp_bundle, X_val_raw, device=device)
+    cat_val_preds = predict_catboost(catboost_model, X_val_raw)
+    best_alpha, blend_score, blend_brier = sweep_alpha(cat_val_preds, mlp_val_preds, y_val_raw)
+    print(f"[Blend] 최적 alpha={best_alpha:.2f} (CatBoost 비중) | 블렌드 Val Score: {blend_score:.2f}")
+
+    bundle = make_blend_bundle(catboost_model, mlp_bundle, best_alpha)
+    bundle["catboost_best_iteration"] = catboost_best_iteration
+
     os.makedirs("./open/temp", exist_ok=True)
     with open("./open/temp/latest_model.pkl", 'wb') as f:
-        pickle.dump(model, f)
-    print("✅ Model saved to ./open/temp/latest_model.pkl")
+        pickle.dump(bundle, f)
+    print(f"✅ Model saved to ./open/temp/latest_model.pkl (mlp best_epoch_avg={mlp_bundle['best_epoch_']}, catboost best_iteration={catboost_best_iteration}, alpha={best_alpha:.2f})")
 
 if __name__ == "__main__":
     main()
