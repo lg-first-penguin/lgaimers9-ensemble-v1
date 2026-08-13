@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A private team pipeline for the LG Aimers / DACON competition (야구 투구 제어 성공 예측, `control_success` binary target, evaluated via Brier Skill Score). Built for Ubuntu 24.04 (WSL2), Python 3.11. Was CatBoost-based; migrated to a PyTorch **Tabular MLP** (embeddings for low-cardinality categoricals + a small MLP over embeddings/numeric features), originally motivated by a Colab prototype that reported ~1500 — that number turned out to be invalid (a random 80/20 split fallback leaking player identity across train/val, not the intended season==2024 holdout; see TABULAR_MLP_REPORT.md §2). On the real, leak-free season==2024 holdout, tuned CatBoost (818.54) actually beats the MLP ensemble alone (789.58) — but on the real competition leaderboard the MLP ensemble scored *higher* than CatBoost, the opposite ranking (see TABULAR_MLP_REPORT.md §4 for why local validation and the real leaderboard disagree here). The current production model is **not MLP alone** — it's a **CatBoost + MLP ensemble blend**, which beat both individual models on the local holdout and scored **924 on the real competition dashboard** after submission (under the alpha-weighted-average version described below) — the local holdout has consistently underestimated real performance throughout this project (see TABULAR_MLP_REPORT.md §4). The combination step was originally a fixed weighted average (`alpha≈0.59` toward CatBoost, 851.19 local) but has since been replaced with a **stacking meta-model** (2-feature logistic regression over `[catboost_pred, mlp_pred]`, no fixed alpha) after rolling-origin cross-validation showed it consistently beats the alpha blend (EXPERIMENTS.md §9); after adopting quantile (PLE) numerical-feature embedding in the MLP component (n_bins=24, EXPERIMENTS.md §15.3-§15.4), current local score is **879.34** (not yet re-submitted to the real dashboard under this architecture). A revisited TabM prototype (BatchEnsemble-style efficient ensemble) with corrected initialization confirmed its original failure hypothesis but still didn't beat the Deep Ensemble MLP, so it stayed unadopted (EXPERIMENTS.md §11, TABULAR_MLP_REPORT.md §5.1). See TABULAR_MLP_REPORT.md for the full trail and EXPERIMENTS.md for the raw experiment log.
+A private team pipeline for the LG Aimers / DACON competition (야구 투구 제어 성공 예측, `control_success` binary target, evaluated via Brier Skill Score). Built for Ubuntu 24.04 (WSL2), Python 3.11. Was CatBoost-based; migrated to a PyTorch **Tabular MLP** (embeddings for low-cardinality categoricals + a small MLP over embeddings/numeric features), originally motivated by a Colab prototype that reported ~1500 — that number turned out to be invalid (a random 80/20 split fallback leaking player identity across train/val, not the intended season==2024 holdout; see TABULAR_MLP_REPORT.md §2). On the real, leak-free season==2024 holdout, tuned CatBoost (818.54) actually beats the MLP ensemble alone (789.58) — but on the real competition leaderboard the MLP ensemble scored *higher* than CatBoost, the opposite ranking (see TABULAR_MLP_REPORT.md §4 for why local validation and the real leaderboard disagree here). The current production model is **not MLP alone** — it's a **CatBoost + MLP ensemble blend**, which beat both individual models on the local holdout and scored **924 on the real competition dashboard** after submission (under the alpha-weighted-average version described below) — the local holdout has consistently underestimated real performance throughout this project (see TABULAR_MLP_REPORT.md §4). The combination step was originally a fixed weighted average (`alpha≈0.59` toward CatBoost, 851.19 local) but has since been replaced with a **stacking meta-model** (2-feature logistic regression over `[catboost_pred, mlp_pred]`, no fixed alpha) after rolling-origin cross-validation showed it consistently beats the alpha blend (EXPERIMENTS.md §9); after adopting quantile (PLE) numerical-feature embedding in the MLP component (n_bins=24, EXPERIMENTS.md §15.3-§15.4), current local score is **879.34** — resubmitted under this architecture and scored **957.80417 on the real competition dashboard** (up from the prior alpha-blend-era 924; EXPERIMENTS.md §15.5), the local holdout underestimating real performance yet again, consistent with every prior submission in this project. A revisited TabM prototype (BatchEnsemble-style efficient ensemble) with corrected initialization confirmed its original failure hypothesis but still didn't beat the Deep Ensemble MLP, so it stayed unadopted (EXPERIMENTS.md §11, TABULAR_MLP_REPORT.md §5.1). See TABULAR_MLP_REPORT.md for the full trail and EXPERIMENTS.md for the raw experiment log.
 
 Competition data link: https://dacon.io/competitions/official/236743/data
 
@@ -554,7 +554,37 @@ data_description.md : 데이터 설명서
 
 제공된 `train.csv`, 평가 환경의 `test.csv`, 2019~2024년 `trackman_history.csv`, 그리고 대회 규칙상 허용되는 외부 데이터만 사용할 수 있습니다.
 
+1) 반드시 지켜야 할 핵심 원칙
+'평가 데이터의 각 행은 독립적으로 예측되어야 합니다.'
 
+즉, 특정 행 A의 예측값은 아래 정보만으로 생성되어야 합니다.
+
+- 행 A에 포함된 입력 변수
+- 행 A의 입력 변수만을 이용해 생성한 파생변수
+- 주최 측이 제공한 공식 학습 데이터
+- 공식 학습 데이터만을 이용해 생성한 통계·모델·파생변수
+
+
+2) 허용되지 않는 방식
+아래와 같은 방식은 정상적인 추론 절차로 인정되지 않습니다.
+
+test.csv 내 다른 행을 이용한 누적 통계 생성
+test.csv 내 다른 행을 이용한 rolling / lag feature 생성
+test.csv 전체의 평균, 분포, 빈도, 순위 등을 이용한 예측값 보정
+같은 선수, 팀, 월, 경기 단위로 평가 데이터 내 다른 행을 집계하는 방식
+평가 데이터상 시점이 더 과거로 보이는 행을 이용해 현재 행의 피처를 생성하는 방식
+평가 데이터에 시점 정보가 포함되어 있더라도,
+
+같은 test.csv 안의 다른 행은 현재 예측 대상 행의 추론에 사용할 수 없습니다.
+
+
+
+3) 쉽게 이해할 수 있는 예시
+어떤 행의 예측값은 아래 두 경우 모두 동일해야 합니다.
+
+test.csv에 해당 행 1개만 있는 경우
+test.csv에 전체 평가 데이터가 함께 있는 경우
+두 경우의 예측값이 달라진다면, 평가 데이터의 다른 행이 추론에 영향을 준 것으로 볼 수 있습니다.
 
 ## Commands
 
@@ -577,7 +607,7 @@ Data must be manually downloaded into `open/data/` (`train.csv`, `test.csv`, `tr
 
 ### Production model: CatBoost + MLP ensemble blend (`code/blend_model.py`, `code/catboost_model.py`)
 
-The model actually shipped in `submit/` is **not** the MLP ensemble alone — it's a stacked combination of two independently-trained models: the tuned CatBoost (see "제출 모델 만들기 설명서" era tuning — hyperparameters extracted via `.get_params()` from the old tuned reference, hardcoded in `code/catboost_model.py::CATBOOST_PARAMS`, all derived from the team's own Optuna search on official data) and the Tabular MLP ensemble described below. Final prediction = `sigmoid(w_cat * catboost_pred + w_mlp * mlp_ensemble_pred + intercept)`, where `w_cat`/`w_mlp`/`intercept` are fit per-run by a 2-feature `LogisticRegression` (`code/blend_model.py::fit_meta_model`) trained on `[catboost_pred, mlp_pred] -> y` over the validation split — this replaced an earlier fixed weighted-average blend (`alpha * catboost_pred + (1-alpha) * mlp_pred`, `alpha≈0.59`, chosen by a 0.01-step grid search) after rolling-origin cross-validation showed the stacking meta-model consistently beats the alpha blend (avg +14.22 pts across 3 time-based folds, 3/3 folds won — see EXPERIMENTS.md §9). Current local score **879.34** (up from the stacking-only version's ~855-861 after the MLP component adopted quantile numerical-feature embedding, EXPERIMENTS.md §15.3-§15.4; vs. the original alpha-blend version's 851.19), beating both CatBoost alone (818.54) and the MLP ensemble alone (789.58, pre-quantile-embedding baseline) — see TABULAR_MLP_REPORT.md §6 for the original blending story and why it helped despite the two models' predictions being highly correlated (0.9991), and EXPERIMENTS.md §9 for the stacking upgrade.
+The model actually shipped in `submit/` is **not** the MLP ensemble alone — it's a stacked combination of two independently-trained models: the tuned CatBoost (see "제출 모델 만들기 설명서" era tuning — hyperparameters extracted via `.get_params()` from the old tuned reference, hardcoded in `code/catboost_model.py::CATBOOST_PARAMS`, all derived from the team's own Optuna search on official data) and the Tabular MLP ensemble described below. Final prediction = `sigmoid(w_cat * catboost_pred + w_mlp * mlp_ensemble_pred + intercept)`, where `w_cat`/`w_mlp`/`intercept` are fit per-run by a 2-feature `LogisticRegression` (`code/blend_model.py::fit_meta_model`) trained on `[catboost_pred, mlp_pred] -> y` over the validation split — this replaced an earlier fixed weighted-average blend (`alpha * catboost_pred + (1-alpha) * mlp_pred`, `alpha≈0.59`, chosen by a 0.01-step grid search) after rolling-origin cross-validation showed the stacking meta-model consistently beats the alpha blend (avg +14.22 pts across 3 time-based folds, 3/3 folds won — see EXPERIMENTS.md §9). Current local score **879.34** (up from the stacking-only version's ~855-861 after the MLP component adopted quantile numerical-feature embedding, EXPERIMENTS.md §15.3-§15.4; vs. the original alpha-blend version's 851.19), beating both CatBoost alone (818.54) and the MLP ensemble alone (789.58, pre-quantile-embedding baseline) — see TABULAR_MLP_REPORT.md §6 for the original blending story and why it helped despite the two models' predictions being highly correlated (0.9991), and EXPERIMENTS.md §9 for the stacking upgrade. This architecture scored **957.80417 on the real competition dashboard** (EXPERIMENTS.md §15.5), up from the prior alpha-blend-era submission's 924.
 
 - **Bundle schema**: `{"catboost_model": <CatBoostClassifier>, "mlp_bundle": {...the MLP ensemble bundle below...}, "meta_model": {"w_cat": float, "w_mlp": float, "intercept": float}, "catboost_best_iteration": int}`. `catboost_model` is a plain library object (not project-defined), so it unpickles fine anywhere `catboost` is installed — no `code/` package dependency, same reasoning as the MLP bundle and `meta_model` being plain dicts (the latter stores raw floats, not a pickled `sklearn.linear_model.LogisticRegression` instance, so inference never needs `sklearn.linear_model` — just the sigmoid formula in `code/blend_model.py::predict_meta`).
 - `code/catboost_model.py::train_catboost(X_train, y_train, X_val=None, y_val=None)` mirrors `train_mlp`'s early-stopping pattern: with a validation set it early-stops on `BrierScore` (patience 50) and returns `(model, best_iteration)`; without one (full-retrain case) it trains a fixed `iterations` count.
