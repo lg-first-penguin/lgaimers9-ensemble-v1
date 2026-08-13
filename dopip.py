@@ -28,7 +28,7 @@ def get_numbered_path(base_dest_path):
         counter += 1
 
 def run_script(script_path):
-    process = subprocess.Popen(["python", script_path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    process = subprocess.Popen([sys.executable, script_path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for line in process.stdout:
         print(line, end="")
     process.wait()
@@ -96,7 +96,7 @@ def main():
 
     # [수정 완료 지점] train.py에서 선언한 무결성 타임필터 전처리 함수를 그대로 수입하여 1줄로 결합 완수
     from code.train import process_trackman_features_safe, add_engineered_features
-    from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, embed_dim_for_cardinality, fit_preprocessing, to_tensors, train_mlp, make_bundle, get_device
+    from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, QUANTILE_N_BINS, embed_dim_for_cardinality, fit_preprocessing, fit_quantile_edges, to_tensors, train_mlp, make_bundle, get_device
     from code.catboost_model import train_catboost, DEFAULT_FULL_RETRAIN_ITERATIONS
     from code.blend_model import make_blend_bundle
 
@@ -140,6 +140,7 @@ def main():
     full_proc, cat_encoder, num_imputer, num_scaler, cat_dims = fit_preprocessing(train_df, CAT_COLS, num_cols)
     X_full_cat, X_full_num, y_full = to_tensors(full_proc, CAT_COLS, num_cols, TARGET_COL)
     embed_dims = [embed_dim_for_cardinality(d) for d in cat_dims]
+    bin_edges = fit_quantile_edges(X_full_num, n_bins=QUANTILE_N_BINS)
 
     device = get_device()
     full_members = []
@@ -147,7 +148,7 @@ def main():
         full_epochs = max(base_epoch, 1) + FULL_RETRAIN_EPOCH_BUFFER
         model, _ = train_mlp(
             X_full_cat, X_full_num, y_full,
-            cat_dims=cat_dims, num_numeric_feats=len(num_cols), embed_dims=embed_dims,
+            cat_dims=cat_dims, embed_dims=embed_dims, bin_edges=bin_edges,
             max_epochs=full_epochs, device=device, seed=seed,
         )
         full_members.append({
@@ -159,7 +160,7 @@ def main():
 
     final_mlp_bundle = make_bundle(
         full_members, CAT_COLS, num_cols, cat_dims, embed_dims,
-        cat_encoder, num_imputer, num_scaler,
+        cat_encoder, num_imputer, num_scaler, bin_edges=bin_edges,
     )
 
     catboost_full_iterations = ref_catboost_best_iteration + CATBOOST_ITERATION_BUFFER

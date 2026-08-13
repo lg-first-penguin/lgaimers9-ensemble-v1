@@ -13,7 +13,7 @@ import pickle
 import numpy as np
 import pandas as pd
 
-from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, embed_dim_for_cardinality, fit_preprocessing, apply_preprocessing, to_tensors, train_ensemble, make_bundle, predict_bundle, get_device
+from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, QUANTILE_N_BINS, embed_dim_for_cardinality, fit_preprocessing, apply_preprocessing, fit_quantile_edges, to_tensors, train_ensemble, make_bundle, predict_bundle, get_device
 from code.catboost_model import train_catboost, predict_catboost
 from code.blend_model import fit_meta_model, make_blend_bundle
 
@@ -126,16 +126,17 @@ def main():
     print(f"[Device] {device}")
 
     embed_dims = [embed_dim_for_cardinality(d) for d in cat_dims]
+    bin_edges = fit_quantile_edges(X_tr_num, n_bins=QUANTILE_N_BINS)
     members = train_ensemble(
         X_tr_cat, X_tr_num, y_tr,
-        cat_dims=cat_dims, num_numeric_feats=len(num_cols), embed_dims=embed_dims,
+        cat_dims=cat_dims, embed_dims=embed_dims, bin_edges=bin_edges,
         X_val_cat=X_val_cat, X_val_num=X_val_num, y_val=y_val_np,
         seeds=ENSEMBLE_SEEDS, device=device,
     )
 
     mlp_bundle = make_bundle(
         members, CAT_COLS, num_cols, cat_dims, embed_dims,
-        cat_encoder, num_imputer, num_scaler,
+        cat_encoder, num_imputer, num_scaler, bin_edges=bin_edges,
     )
 
     print("\n--- [CatBoost] 블렌딩용 CatBoost 모델 학습 ---")

@@ -1,4 +1,5 @@
 # script.py
+import math
 import os
 import pickle
 import numpy as np
@@ -15,17 +16,53 @@ CAT_COLS = [
 ]
 
 
+class QuantileEmbedding(nn.Module):
+    """code/mlp_model.py::QuantileEmbedding 와 동일 (수동 동기화 유지). 수치형 피처별
+    quantile 기반 piecewise-linear 인코딩(PLE) + 피처별 독립 Linear + ReLU."""
+
+    def __init__(self, bin_edges, d_embed=8, use_relu=True):
+        super().__init__()
+        self.register_buffer("edges", bin_edges)  # (num_numeric, n_bins+1), 학습 안 함
+        num_numeric, n_bins_plus1 = bin_edges.shape
+        n_bins = n_bins_plus1 - 1
+        self.num_numeric = num_numeric
+        self.n_bins = n_bins
+        self.use_relu = use_relu
+        self.weight = nn.Parameter(torch.empty(num_numeric, n_bins, d_embed))
+        self.bias = nn.Parameter(torch.zeros(num_numeric, d_embed))
+        bound = 1.0 / math.sqrt(n_bins)
+        nn.init.uniform_(self.weight, -bound, bound)
+
+    def encode(self, x_num):
+        left = self.edges[:, :-1].unsqueeze(0)
+        right = self.edges[:, 1:].unsqueeze(0)
+        x = x_num.unsqueeze(-1)
+        width = (right - left).clamp_min(1e-6)
+        frac = (x - left) / width
+        return frac.clamp(0.0, 1.0)
+
+    def forward(self, x_num):
+        p = self.encode(x_num)
+        e = torch.einsum("bnf,nfd->bnd", p, self.weight) + self.bias
+        if self.use_relu:
+            e = torch.relu(e)
+        return e.reshape(e.shape[0], -1)
+
+
 class TabularMLP(nn.Module):
     """code/mlp_model.py::TabularMLP 와 동일한 구조 (submit.zip에는 code/ 패키지가
-    포함되지 않으므로 대회 서버에서 독립 실행 가능하도록 그대로 복제해 둡니다)."""
+    포함되지 않으므로 대회 서버에서 독립 실행 가능하도록 그대로 복제해 둡니다).
+    수치형 입력은 QuantileEmbedding(PLE, n_bins=24, d=8 — EXPERIMENTS.md §15.3)으로
+    인코딩합니다."""
 
-    def __init__(self, num_numeric_feats, cat_dims, embed_dims, hidden1=128, hidden2=64, dropout=0.3):
+    def __init__(self, cat_dims, embed_dims, bin_edges, quantile_d=8, hidden1=128, hidden2=64, dropout=0.3):
         super().__init__()
         self.embed_dims = list(embed_dims)
         self.embeddings = nn.ModuleList([
             nn.Embedding(num_embeddings=dim + 2, embedding_dim=edim) for dim, edim in zip(cat_dims, self.embed_dims)
         ])
-        total_input_dim = sum(self.embed_dims) + num_numeric_feats
+        self.quantile = QuantileEmbedding(bin_edges, d_embed=quantile_d)
+        total_input_dim = sum(self.embed_dims) + bin_edges.shape[0] * quantile_d
 
         self.mlp = nn.Sequential(
             nn.Linear(total_input_dim, hidden1),
@@ -42,7 +79,8 @@ class TabularMLP(nn.Module):
     def forward(self, x_cat, x_num):
         embeds = [emb(x_cat[:, i].long()) for i, emb in enumerate(self.embeddings)]
         x_embed = torch.cat(embeds, dim=1)
-        x_all = torch.cat([x_embed, x_num], dim=1)
+        x_quantile = self.quantile(x_num)
+        x_all = torch.cat([x_embed, x_quantile], dim=1)
         return self.sigmoid(self.mlp(x_all)).squeeze(-1)
 
 
@@ -183,9 +221,10 @@ def main():
     with torch.no_grad():
         for member in mlp_bundle["members"]:
             model = TabularMLP(
-                num_numeric_feats=len(mlp_bundle["num_cols"]),
                 cat_dims=mlp_bundle["cat_dims"],
                 embed_dims=mlp_bundle["embed_dims"],
+                bin_edges=mlp_bundle["bin_edges"],
+                quantile_d=mlp_bundle.get("quantile_d", 8),
             ).to(device)
             model.load_state_dict(member["state_dict"])
             model.eval()

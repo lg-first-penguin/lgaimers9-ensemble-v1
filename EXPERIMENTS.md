@@ -469,3 +469,34 @@ periodic이 노이즈로 판정된 뒤, 같은 "수치형 피처 임베딩" 아�
 periodic(+4.15)보다는 delta가 크지만(+8.17) 여전히 baseline std(23.35) 안에 들어가고, 짝지은 시드별 비교에서도 과반(4/7)이 baseline 승리라 방향성이 뚜렷하지 않다. periodic과 마찬가지로 "노이즈 수준, 채택 근거 부족"에 가까운 상태.
 
 **상태: 결론 보류, 재개 예정.** n_bins=8 한 지점만으로는 quantile 인코딩 자체를 완전히 기각하기엔 이르다고 판단해 세션을 일시 중단 — 다음 재개 시 n_bins 그리드(`code/experiment_quantile_embed.py --step sweep --binlist 4,16,32`, 이미 구현됨)로 이어서 확인할 예정. 지금까지 나온 패턴(periodic도 노이즈, quantile도 약한 신호)을 볼 때 그리드를 넓혀도 비슷한 결과일 가능성이 높다고 보지만, 확정 짓지 않고 이어서 검증하기로 함.
+
+### 15.3 n_bins 그리드 재개 — n_bins=16~24에서 뚜렷한 신호 확인, n_bins=24 채택
+
+§15.2를 재개해 n_bins 그리드(`code/experiment_quantile_embed.py --step sweep`)를 확장했다. 이번엔 baseline도 **같은 7-seed로 다시 학습**해서(저장된 평균값 재사용이 아니라) seed별 paired 비교(승/패)까지 가능하게 했다 — §15.1에서 "3-seed 스크리닝만으로는 검정력이 약하다"를 확인한 뒤로, 평균 delta만으로는 우연과 신호를 구분하기 어렵다는 게 이 프로젝트의 반복된 교훈이기 때문이다.
+
+1차로 n_bins=16, 32를 스윕(baseline은 §15.2의 저장값 688.14 재사용)한 뒤, paired 승률 확인을 위해 baseline을 동일 7-seed로 재학습(680.89, std 17.35 — §15.2의 688.14와는 다른 실행이라 절대값 차이가 나지만 GPU 논디터미니즘 범위 안). 이 680.89 기준 seed별 실측값으로 n_bins=16/32를 다시 paired 비교하고, 8~16/16~32 사이를 좁히기 위해 n_bins=12, 24를 추가 스윕:
+
+| n_bins | 7-seed 평균 | std | delta | baseline 대비 승률 |
+| --- | --- | --- | --- | --- |
+| baseline (재학습, paired) | 680.89 | 17.35 | +0.00 | — |
+| 4 | 690.08 | 44.74 | +1.94 | 노이즈(승률 불명, std가 baseline보다 큼) |
+| 12 | 702.31 | 28.57 | +21.42 | 5/7 (99, 31337에서 패) |
+| **16** | 730.95 | 24.96 | **+50.06** | **7/7** |
+| **24** | 736.67 | 23.49 | **+55.78** | **7/7** |
+| 32 | 735.34 | 32.70 | +54.45 | 6/7 (555에서 −22.72로 크게 패) |
+
+(n_bins=4/16/32는 §15.2와 동일 스크립트·동일 seed 순서로 학습해 baseline 재학습분과 정확히 짝지어 승패를 셀 수 있었다. n_bins=8은 §15.2 실행분만 있고 이번 paired baseline과 짝지어 재확인하지 않았다 — 표에서 제외.)
+
+패턴이 뚜렷하다: n_bins=16~24 구간이 delta 크기(+50~+56, baseline std의 2~3배)·승률(7/7)·분산(std 23~25로 오히려 baseline보다 안정) 세 지표 모두에서 이전 periodic/quantile n_bins=8 실험과 확연히 다르다 — 그때는 델타가 baseline std 안에 묻히거나 승률이 절반 근처였다. n_bins=12는 다시 애매해지고(5/7, std 커짐) n_bins=32는 32.70으로 분산이 커지며 세부 seed(555)에서 크게 밀린다. 즉 "좋은 구간"은 16~24이고 그 안에서는 24가 delta·승률·std 세 지표 모두 최우수.
+
+**결론: 채택.** n_bins=24, d=8(Q-LR, ReLU 포함)을 `code/mlp_model.py::TabularMLP`의 수치형 처리 기본 경로로 정식 반영했다 — `QuantileEmbedding`/`fit_quantile_edges`를 `code/mlp_model.py`로 옮기고, `TabularMLP`/`train_mlp`/`train_ensemble`/`predict_ensemble`/`make_bundle`/`predict_bundle`에 `bin_edges` 파라미터를 추가했다(주어지면 quantile 임베딩 경로, `None`이면 예전 raw-concat 경로 — `code/experiment_periodic_embed.py::run_baseline` 등 과거 임베딩 대조 실험의 raw-concat 기준선 재현용으로 하위 호환 유지). `code/train.py`와 `dopip.py`의 full retrain 단계 양쪽에서 학습 split(또는 전체 데이터)의 표준화된 수치형 값으로 `bin_edges`를 새로 fit해 사용하고, 번들에 `"bin_edges"`/`"quantile_d"` 키로 저장한다. `submit/script.py`에도 `QuantileEmbedding` 클래스와 갱신된 `TabularMLP`를 수동 동기화로 복제했다.
+
+**주의(미해결 채로 남기는 부분)**: 이 채택 판단은 여전히 단일 시간 분할(season==2024 홀드아웃) 기준이다 — §9(스태킹 메타모델)처럼 rolling-origin 여러 fold로 재검증하지는 않았고, 실제 리더보드에도 아직 이 아키텍처로 제출한 적이 없다. 이 프로젝트에서 로컬 홀드아웃이 실제 성능을 과소평가해온 이력(TABULAR_MLP_REPORT.md §4)과 반대로, 소표본/단일분할 개선이 fold를 늘리면 사라진 사례(§13.1)도 있었던 만큼, 다음 `dopip.py` 전체 파이프라인 실행과 실제 제출 결과로 이 채택을 재확인할 필요가 있다.
+
+### 15.4 전체 파이프라인 재확인 — CatBoost+MLP 블렌드 BSS 879.34로 승격
+
+§15.3의 "미해결" 사항대로 실제 `dopip.py` 전체 파이프라인(개별 실험 스크립트가 아니라 `code/train.py` → `code/test.py` reference 비교 → full retrain)을 quantile n_bins=24가 반영된 코드로 실행해 재확인했다.
+
+결과: 신규 블렌드 모델 BSS 0.00879 (환산 879.34) vs 기존 reference(알파 블렌드 시절 스태킹, 855.31) — **+24.03점**, 기존 reference를 넘어서 `open/reference/best_model.pkl`로 승격됨. 개별 MLP 시드는 이전과 마찬가지로 시드 간 편차가 크지만(단일 시드 Val Score 277~767 범위) 7-시드 앙상블 + CatBoost 블렌드 수준에서는 §15.3의 실험 스크립트 스크리닝 결과와 같은 방향(quantile 임베딩이 raw-concat 대비 우위)으로 재현됐다 — 실험 스크립트와 프로덕션 파이프라인(트랙맨 피처 포함 116개 수치형 컬럼, 전체 학습 파이프라인)이 서로 다른 코드 경로임에도 결론이 일치한다는 점에서 §15.3의 채택 판단에 대한 독립적인 재확인으로 본다.
+
+Full retrain으로 `submit/model/final_retained_model.pkl`도 갱신됨. 다만 이 879.34는 여전히 로컬 season==2024 단일 홀드아웃 기준이며, TABULAR_MLP_REPORT.md §4에서 반복 확인된 대로 로컬 홀드아웃이 실제 리더보드 성능을 과소평가해온 이력이 있으므로, 실제 제출 결과로 다시 한번 검증이 필요하다 — 이 아키텍처로는 아직 실제 리더보드 제출 이력 없음.
