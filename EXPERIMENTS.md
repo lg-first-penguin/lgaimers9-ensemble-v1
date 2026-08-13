@@ -454,3 +454,18 @@ RandomForest와 정반대 결과다. RandomForest는 배깅이라 그래디언�
 추가된 4개 시드 중 하나(31337)가 628.72로 크게 떨어지면서 3-seed 때의 +28.45가 +4.15로 주저앉았다 — baseline std(23.35)보다도 작은 크기라 완전히 노이즈 안에 파묻힌다. §14.3에서 우려했던 "3-seed 스크리닝만으로는 검정력이 약하다"는 경고가 정확히 재현된 사례.
 
 **결론(최종): 미채택.** sigma=1.0급 고주파 임베딩은 명확히 위험(학습 붕괴)하고, sigma를 작게 잡아 논문의 "안전 구간"에 두더라도 이 데이터셋/아키텍처 조합에서는 baseline(수치형을 표준화만 해서 concat) 대비 유의미한 개선이 없다. `code/mlp_model.py::TabularMLP`는 변경하지 않는다. `code/periodic_mlp_model.py`/`code/experiment_periodic_embed.py`는 향후 다른 k/d 조합이나 quantile 임베딩 등을 시도할 때 재사용할 수 있도록 실험용으로만 남겨둔다.
+
+### 15.2 quantile 기반 piecewise-linear 인코딩(PLE) — 대조 실험, 역시 노이즈 수준 (재개 예정)
+
+periodic이 노이즈로 판정된 뒤, 같은 "수치형 피처 임베딩" 아이디어를 다른 인코딩으로 재검증. Gorishniy et al.의 Q-LR(Quantile 기반 piecewise-linear 인코딩 + 피처별 독립 Linear + ReLU) 변형을 구현 — `code/quantile_mlp_model.py`(`QuantileEmbedding`, `TabularMLPQuantile`, `train_mlp_quantile`), 실험 스크립트는 `code/experiment_quantile_embed.py`(`code/experiment_periodic_embed.py`의 `prepare_tensors`/`run_baseline`을 그대로 재사용). periodic의 "주파수 개수 k"에 대응하는 하이퍼파라미터는 "quantile 구간 개수 n_bins"로, 공정 비교를 위해 periodic과 동일하게 n_bins=8, d=8로 시작. 구간 경계는 트레인 스플릿에서만 quantile로 계산(리크 방지), 중복 경계(저카디널리티 피처)는 1e-6 epsilon으로 단조 증가를 보장.
+
+이번엔 §15.1의 교훈을 반영해 3-seed 스크리닝 직후 바로 나머지 4-seed(`2024, 99, 555, 31337`)까지 채워 7-seed로 재검증:
+
+| | 7-seed 평균 | std | delta | baseline 대비 시드별 승률 |
+| --- | --- | --- | --- | --- |
+| baseline(표준화만, §15.1과 동일) | 688.14 | 23.35 | +0.00 | — |
+| quantile n_bins=8, d=8 | 696.31 | 17.31 | +8.17 | **3/7** (42, 2024, 555, 31337에서 패, 그중 31337은 −0.04로 사실상 동률) |
+
+periodic(+4.15)보다는 delta가 크지만(+8.17) 여전히 baseline std(23.35) 안에 들어가고, 짝지은 시드별 비교에서도 과반(4/7)이 baseline 승리라 방향성이 뚜렷하지 않다. periodic과 마찬가지로 "노이즈 수준, 채택 근거 부족"에 가까운 상태.
+
+**상태: 결론 보류, 재개 예정.** n_bins=8 한 지점만으로는 quantile 인코딩 자체를 완전히 기각하기엔 이르다고 판단해 세션을 일시 중단 — 다음 재개 시 n_bins 그리드(`code/experiment_quantile_embed.py --step sweep --binlist 4,16,32`, 이미 구현됨)로 이어서 확인할 예정. 지금까지 나온 패턴(periodic도 노이즈, quantile도 약한 신호)을 볼 때 그리드를 넓혀도 비슷한 결과일 가능성이 높다고 보지만, 확정 짓지 않고 이어서 검증하기로 함.
