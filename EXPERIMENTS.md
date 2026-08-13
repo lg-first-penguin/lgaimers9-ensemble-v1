@@ -420,3 +420,37 @@ RandomForest와 정반대 결과다. RandomForest는 배깅이라 그래디언�
 ### 14.4 종합
 
 이번 라운드에서 시도한 5개 후보(트랙맨 coarsening 3단계, 배터 강화, pitch-mix 교차, MLP loss/embedding 2종, CatBoost RMSE loss) 전부 baseline을 넘지 못했다. §12~§13(3번째 모델 추가)에 이어 이번에도 "직관적으로 그럴듯한 방향"이 실측에서는 대부분 손해였다 — 이 프로젝트의 CatBoost/MLP 조합은 이미 상당히 성숙한 로컬 최적점 근방에 있는 것으로 보인다. `TABULAR_MLP_REPORT.md` §9의 "트랙맨 피처 고도화" 항목은 이번 실험으로 종결하고, "수치형 피처 임베딩(periodic/quantile embedding)"은 여전히 미시도 상태로 남긴다.
+
+## 15. 수치형 피처 주기함수(periodic) 임베딩 — 3-seed 스크리닝 (잠정 노이즈 수준, 재검증 예정)
+
+§14.4에서 미시도로 남겨둔 "수치형 피처 임베딩"을 검증. 현재 `TabularMLP`는 수치형 116개 컬럼(트랙맨 결합 + 파생 피처 포함, 대회 원본 44개보다 많음)을 표준화만 해서 그대로 concat하는데, Gorishniy et al.("On Embeddings for Numerical Features in Tabular Deep Learning")의 PLR(Periodic-Linear-ReLU) 임베딩으로 대체해봤다: 피처마다 학습 가능한 주파수 `c_j ~ N(0, sigma^2)`로 `[sin(2*pi*c_j*x), cos(2*pi*c_j*x)]`(주파수 개수 k=8)를 만들고, 피처별 독립 Linear(비공유 가중치)로 d_embed=8차원 임베딩을 얻은 뒤 ReLU를 거쳐 concat — 범주형 임베딩과 동일한 역할을 수치형에도 부여하는 셈이다. 구현은 `code/periodic_mlp_model.py`(`PeriodicEmbedding`, `TabularMLPPeriodic`, `train_mlp_periodic`), 실험 스크립트는 `code/experiment_3way_stack.py`와 동일한 관례로 `code/experiment_periodic_embed.py` — 둘 다 `dopip.py` 메인 파이프라인에는 아직 미반영.
+
+§14.3(loss function 스크리닝)과 같은 이유로 7-seed 풀 앙상블 대신 3-seed(`[42, 123, 7]`) 스크리닝으로 방향성만 먼저 확인. sigma(주파수 초기화 스케일)가 논문에서도 가장 성능을 좌우하는 하이퍼파라미터로 지목되어 그리드로 스윕:
+
+| sigma | 3-seed 평균 | std | delta (baseline 677.06) |
+| --- | --- | --- | --- |
+| baseline(표준화만, PeriodicEmbedding 없음) | 677.06 | 23.69 | +0.00 |
+| 0.001 | 705.51 | 11.21 | +28.45 |
+| 0.003 | 661.42 | 30.81 | −15.64 |
+| 0.01 | 693.26 | 28.72 | +16.20 |
+| 0.02 | 702.69 | 46.33 | +25.63 |
+| 0.05 | 681.90 | 13.77 | +4.84 |
+| 0.1 | 680.79 | 27.13 | +3.73 |
+| 1.0 | 289.66 | 220.17 | **−387.40** (붕괴, 시드 하나는 Val Score 0.00으로 학습 실패) |
+
+**sigma=1.0의 붕괴는 명확한 신호다** — 주파수가 너무 크면 sin/cos 곡면이 지나치게 고주파로 요동쳐 최적화 지형이 깨지고(3개 시드 중 1개는 아예 학습 실패), 이는 논문에서 지적한 sigma 민감도가 그대로 재현된 것으로 해석.
+
+**반면 sigma가 작은 구간(0.001~0.1)은 노이즈로 보인다.** 인접한 값끼리 매끄럽게 이어지지 않고 부호가 뒤집힌다 — 0.001(+28.45) → 0.003(**−15.64**) → 0.01(+16.20) → 0.02(+25.63) → 0.05(+4.84). 진짜 sigma 효과라면 이 정도로 촘촘한 그리드에서 바로 옆 지점끼리 부호가 반대로 나오기 어렵다. delta 크기(4~28점)도 시드 간 자연 변동폭(std 11~46, baseline 자체도 std 23.69)과 겹치는 수준이라, §14.3의 MLP loss/embedding 실험과 동일하게 "3-seed로는 진짜 개선인지 우연인지 구분 불가" 판정.
+
+### 15.1 sigma=0.001, 7-seed 재검증 — 노이즈였음을 확인
+
+가장 좋았던 sigma=0.001(3-seed delta +28.45, std 11.21로 그리드 내 가장 낮음)이 우연인지 재현되는 신호인지 확인하기 위해, `ENSEMBLE_SEEDS`(7-seed, `[42, 123, 7, 2024, 99, 555, 31337]`)의 나머지 4개 시드(`2024, 99, 555, 31337`)를 baseline과 sigma=0.001 양쪽에 추가로 학습해 7-seed 전체로 재비교:
+
+| | 7-seed 평균 | std | delta |
+| --- | --- | --- | --- |
+| baseline(표준화만) | 688.14 | 23.35 | +0.00 |
+| periodic sigma=0.001 | 692.29 | 28.02 | **+4.15** |
+
+추가된 4개 시드 중 하나(31337)가 628.72로 크게 떨어지면서 3-seed 때의 +28.45가 +4.15로 주저앉았다 — baseline std(23.35)보다도 작은 크기라 완전히 노이즈 안에 파묻힌다. §14.3에서 우려했던 "3-seed 스크리닝만으로는 검정력이 약하다"는 경고가 정확히 재현된 사례.
+
+**결론(최종): 미채택.** sigma=1.0급 고주파 임베딩은 명확히 위험(학습 붕괴)하고, sigma를 작게 잡아 논문의 "안전 구간"에 두더라도 이 데이터셋/아키텍처 조합에서는 baseline(수치형을 표준화만 해서 concat) 대비 유의미한 개선이 없다. `code/mlp_model.py::TabularMLP`는 변경하지 않는다. `code/periodic_mlp_model.py`/`code/experiment_periodic_embed.py`는 향후 다른 k/d 조합이나 quantile 임베딩 등을 시도할 때 재사용할 수 있도록 실험용으로만 남겨둔다.
