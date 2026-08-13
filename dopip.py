@@ -94,8 +94,7 @@ def main():
     with open(ref_model_path, 'rb') as f:
         best_bundle = pickle.load(f)
 
-    # [수정 완료 지점] train.py에서 선언한 무결성 타임필터 전처리 함수를 그대로 수입하여 1줄로 결합 완수
-    from code.train import process_trackman_features_safe, add_engineered_features
+    from code.train import apply_f1_filter, add_engineered_features
     from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, QUANTILE_N_BINS, embed_dim_for_cardinality, fit_preprocessing, fit_quantile_edges, to_tensors, train_mlp, make_bundle, get_device
     from code.catboost_model import train_catboost, DEFAULT_FULL_RETRAIN_ITERATIONS
     from code.blend_model import make_blend_bundle
@@ -122,14 +121,13 @@ def main():
 
     DATA_DIR = "./open/data"
     train_df_raw = pd.read_csv(os.path.join(DATA_DIR, "train.csv"), encoding="utf-8-sig")
-    df_trm_raw = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"), encoding="utf-8-sig")
+    train_df_raw['top_bottom'] = train_df_raw['top_bottom'].map({'T': 0, 'B': 1}).astype('int64')
 
-    tr_final, match_cols = process_trackman_features_safe(train_df_raw, df_trm_raw, is_train_split=False)
-
-    train_df = tr_final.dropna(subset=[TARGET_COL]).reset_index(drop=True)
+    train_df = train_df_raw.dropna(subset=[TARGET_COL]).reset_index(drop=True)
 
     league_success_mean = train_df[TARGET_COL].mean()
     train_df = add_engineered_features(train_df, league_success_mean)
+    train_df = apply_f1_filter(train_df)
 
     drop_cols = [ID_COL, TARGET_COL]
     full_features = [col for col in train_df.columns if col not in drop_cols]

@@ -10,13 +10,14 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 import pickle
+import numpy as np
 import pandas as pd
 
 ID_COL = "row_id"
 TARGET_COL = "control_success"
 
 # 이제 상위 루트 디렉토리가 시스템 패스에 잡혀있으므로 완벽하게 import 성공합니다.
-from code.train import process_trackman_features_safe, add_engineered_features
+from code.train import add_engineered_features
 from code.mlp_model import compute_bss
 from code.blend_model import predict_blend_bundle
 
@@ -32,12 +33,9 @@ def main():
     REF_MODEL_PATH = "./open/reference/best_model.pkl"
 
     df = pd.read_csv(os.path.join(DATA_DIR, "train.csv"))
-    df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"))
+    df['top_bottom'] = df['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
 
-    # 10-Key 타임 필터 기반 가동 동기화 (is_train_split=True)
-    tr_final, match_cols = process_trackman_features_safe(df, df_trm, is_train_split=True)
-
-    train_df = tr_final.dropna(subset=[TARGET_COL]).reset_index(drop=True)
+    train_df = df.dropna(subset=[TARGET_COL]).reset_index(drop=True)
 
     # train.py와 동일하게 train-split(season<2024) 기준 리그 평균으로 파생 피처 산출
     train_mask = train_df['season'] < 2024
@@ -69,8 +67,17 @@ def main():
         with open(REF_MODEL_PATH, 'rb') as f:
             ref_bundle = pickle.load(f)
         if isinstance(ref_bundle, dict) and "catboost_model" in ref_bundle and "mlp_bundle" in ref_bundle and "meta_model" in ref_bundle:
-            ref_bss, ref_score = calculate_bss(ref_bundle, X_val, y_val)
-            print(f" ➔ 기존 최고 Reference 모델 BSS: {ref_bss:.5f} (점수: {ref_score:.2f})")
+            try:
+                ref_bss, ref_score = calculate_bss(ref_bundle, X_val, y_val)
+                print(f" ➔ 기존 최고 Reference 모델 BSS: {ref_bss:.5f} (점수: {ref_score:.2f})")
+            except Exception as e:
+                # 번들 포맷(dict 키)은 현재 스태킹 구조와 같아도, 그 안의 CatBoost/MLP가
+                # 기대하는 피처 스키마(컬럼 구성)가 이번 실행과 다를 수 있습니다 — 예:
+                # 트랙맨 피처 제거/F1 필터 도입처럼 학습 피처 집합 자체가 바뀐 경우.
+                # 이런 스키마 불일치는 예측 단계에서 예외로 드러나므로, 위의 legacy 포맷
+                # 분기와 동일하게 "비교 불가 -> 신규 모델 채택"으로 처리합니다.
+                ref_bss = -float('inf')
+                print(f" ⚠ 기존 Reference 모델의 피처 스키마가 이번 실행과 호환되지 않습니다 ({e}). 비교를 건너뛰고 신규 모델을 채택합니다.")
         else:
             # CatBoost 단독/MLP 단독 시절의 레거시 번들, 또는 "alpha" 가중평균 시절의
             # 구 블렌드 번들("meta_model" 키가 없는 버전)은 현재 스태킹 번들 포맷과

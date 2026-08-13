@@ -17,49 +17,21 @@ from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, QUANTILE_N_BINS, embed_dim_
 from code.catboost_model import train_catboost, predict_catboost
 from code.blend_model import fit_meta_model, make_blend_bundle
 
-def process_trackman_features_safe(df_main, df_trm, is_train_split=True):
-    """타임 리크가 차단된 10-Key 상황 지문 기반 트랙맨 전처리 결합 엔진"""
-    df_main_copy = df_main.copy()
-    df_trm_copy = df_trm.copy()
+def apply_f1_filter(df):
+    """2022년 이하 시즌의 game_type=='F'(퓨처스/2군) 행을 학습에서만 제거.
 
-    if is_train_split:
-        max_season = df_main_copy['season'].max()
-        max_month = df_main_copy[df_main_copy['season'] == max_season]['game_month'].max()
-        future_mask = (df_trm_copy['season'] > max_season) | \
-                      ((df_trm_copy['season'] == max_season) & (df_trm_copy['game_month'] > max_month))
-        df_trm_copy = df_trm_copy[~future_mask].reset_index(drop=True)
-        print(f"⏳ [Time Filter] {max_season}년 {max_month}월 이전의 트랙맨 데이터만 잘라내어 피처를 산출합니다.")
-
-    match_cols = [dfc for dfc in df_main_copy.columns if (dfc in df_trm_copy.columns) and dfc != 'row_id']
-
-    grouped = df_trm_copy.groupby(match_cols + ['pitch_type_group', 'auto_pitch_type'])
-    grouped_phase1 = grouped[['rel_speed', 'spin_rate', 'induced_vert_break', 'horz_break', 'extension', 'rel_height', 'rel_side', 'zone_speed']].agg(['mean', 'std'])
-    grouped_phase2 = grouped_phase1.reset_index()
-
-    std_cols = [col for col in grouped_phase2.columns if 'std' in col]
-    grouped_phase2[std_cols] = grouped_phase2[std_cols].fillna(0)
-    grouped_phase2.columns = ['_'.join(col).strip('_') for col in grouped_phase2.columns]
-
-    grouped_phase3 = grouped_phase2.drop(columns='auto_pitch_type')
-    grouped_phase3 = grouped_phase3.groupby(match_cols + ['pitch_type_group']).agg(['mean'])
-
-    pivoted = grouped_phase3.unstack(level='pitch_type_group')
-    pivoted.columns = [f"{col[0]}_{col[1]}_{col[2]}" for col in pivoted.columns]
-    tm_final = pivoted.reset_index()
-    tm_final = tm_final.fillna(0)
-
-    df_main_copy['top_bottom'] = df_main_copy['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
-    tm_final['top_bottom'] = tm_final['top_bottom'].map({'Top': 0, 'Bottom': 1}).astype(np.int64)
-
-    for col in ['batter_hand', 'pitcher_hand']:
-        if col in tm_final.columns:
-            tm_final[col] = tm_final[col].map({'Left': 1, 'Right': 2}).astype(np.int64)
-
-    tr_final = pd.merge(df_main_copy, tm_final, on=match_cols, how='left')
-    new_feature_cols = [col for col in tm_final.columns if col not in match_cols]
-    tr_final[new_feature_cols] = tr_final[new_feature_cols].fillna(tr_final[new_feature_cols].mean())
-
-    return tr_final, match_cols
+    2023년부터 F의 제구 성공률이 R(1군)보다 낮아지는 방향으로 관계가 역전됐는데
+    (2022 이전: F가 R보다 최대 +20.5%p 높음 -> 2023~2024: 오히려 -3.0%p 낮음),
+    game_type이 CatBoost 피처 중요도 1위라 이 역전이 학습을 크게 오염시킨다
+    (season==2023 단일 홀드아웃 검증 시 스코어가 0에 가깝게 붕괴). 2023년 이후 F는
+    새 관계가 유효하므로 남긴다 — 전량 제거는 검증에서 더 낮은 점수를 보였다.
+    가중치로 희석하는 방식(2023 이후 F에 2배 가중)도 시도됐으나 조기 종료가 첫 트리에서
+    멈추는 등 실패해, 오염 구간은 제거가 유일한 해법으로 확인됐다 (EXPERIMENTS.md 참고).
+    검증/추론 데이터에는 적용하지 않는다 — 학습 데이터에만 적용한다."""
+    before = len(df)
+    filtered = df[~((df['game_type'] == 'F') & (df['season'] <= 2022))].reset_index(drop=True)
+    print(f"[F1 필터] game_type=='F' & season<=2022 제거: {before} -> {len(filtered)}행 ({before - len(filtered)}행 제거)")
+    return filtered
 
 def add_engineered_features(df, league_success_mean):
     """asof_* 및 카운트 정보를 조합한 파생 피처를 추가합니다."""
@@ -95,11 +67,9 @@ def main():
     DATA_DIR = "./open/data"
     target_col = 'control_success'
     df = pd.read_csv(os.path.join(DATA_DIR, "train.csv"))
-    df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"))
+    df['top_bottom'] = df['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
 
-    tr_final, match_cols = process_trackman_features_safe(df, df_trm, is_train_split=True)
-
-    train_df = tr_final.dropna(subset=[target_col]).reset_index(drop=True)
+    train_df = df.dropna(subset=[target_col]).reset_index(drop=True)
 
     train_mask = train_df['season'] < 2024
     val_mask = train_df['season'] == 2024
@@ -113,7 +83,8 @@ def main():
 
     train_split = train_df.loc[train_mask, features + [target_col]].reset_index(drop=True)
     val_split = train_df.loc[val_mask, features + [target_col]].reset_index(drop=True)
-    print(f"훈련 데이터 (2019~2023): {len(train_split)} 행 | 검증 데이터 (2024): {len(val_split)} 행")
+    train_split = apply_f1_filter(train_split)
+    print(f"훈련 데이터 (2019~2023, F1 필터 적용): {len(train_split)} 행 | 검증 데이터 (2024): {len(val_split)} 행")
 
     train_proc, cat_encoder, num_imputer, num_scaler, cat_dims = fit_preprocessing(train_split, CAT_COLS, num_cols)
     val_proc = apply_preprocessing(val_split, CAT_COLS, num_cols, cat_encoder, num_imputer, num_scaler)
