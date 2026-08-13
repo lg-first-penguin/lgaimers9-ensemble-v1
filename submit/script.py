@@ -125,6 +125,66 @@ def apply_preprocessing(df, cat_cols, num_cols, cat_encoder, num_imputer, num_sc
     return df
 
 
+def build_trackman_lookup(df_trm, match_cols):
+    """트랙맨 로그를 match_cols 기준으로 집계/피벗한 룩업 테이블을 만듭니다.
+    (code/train.py::process_trackman_features_safe 의 집계 로직과 동일)"""
+    grouped = df_trm.groupby(match_cols + ['pitch_type_group', 'auto_pitch_type'])
+    grouped_phase1 = grouped[['rel_speed', 'spin_rate', 'induced_vert_break', 'horz_break', 'extension', 'rel_height', 'rel_side', 'zone_speed']].agg(['mean', 'std'])
+    grouped_phase2 = grouped_phase1.reset_index()
+
+    std_cols = [col for col in grouped_phase2.columns if 'std' in col]
+    grouped_phase2[std_cols] = grouped_phase2[std_cols].fillna(0)
+    grouped_phase2.columns = ['_'.join(col).strip('_') for col in grouped_phase2.columns]
+
+    grouped_phase3 = grouped_phase2.drop(columns='auto_pitch_type')
+    grouped_phase3 = grouped_phase3.groupby(match_cols + ['pitch_type_group']).agg(['mean'])
+
+    pivoted = grouped_phase3.unstack(level='pitch_type_group')
+    pivoted.columns = [f"{col[0]}_{col[1]}_{col[2]}" for col in pivoted.columns]
+    tm_final = pivoted.reset_index()
+    tm_final = tm_final.fillna(0)
+
+    if 'top_bottom' in tm_final.columns:
+        tm_final['top_bottom'] = tm_final['top_bottom'].map({'Top': 0, 'Bottom': 1}).astype(np.int64)
+    for col in ['batter_hand', 'pitcher_hand']:
+        if col in tm_final.columns:
+            tm_final[col] = tm_final[col].map({'Left': 1, 'Right': 2}).astype(np.int64)
+    return tm_final
+
+
+def merge_trackman_features(df_main, df_trm, match_cols):
+    """df_main(평가 데이터)에 트랙맨 파생 피처를 결합합니다. 1차로 season을 포함한
+    전체 match_cols(10-key)로 매칭하고, 매칭에 실패한 행(트랙맨이 해당 시즌 자체를
+    포함하지 않는 경우 — 예: 평가 데이터가 항상 season==2025인데 trackman_history.csv는
+    2019~2024까지만 있어 season 등호 조건이 구조적으로 항상 실패하는 경우)에 한해
+    season을 제외한 나머지 컬럼으로 재매칭합니다(2차 fallback).
+
+    이 fallback은 여기(추론 전용 코드)에서만 적용합니다 — 학습 시점
+    (code/train.py::process_trackman_features_safe)에는 적용하지 않습니다. 평가 시점의
+    season은 trackman_history.csv가 커버하는 모든 시즌보다 항상 미래이므로(예: 2025 >
+    2019~2024) season을 빼고 매칭해도 미래 정보를 끌어올 위험이 없지만, 학습 시점에는
+    이전 시즌 행이 이후 시즌 트랙맨 데이터를 보게 되는 실제 리크가 생길 수 있기 때문입니다
+    (season 등호가 현재 유일한 시간 리크 방지 장치 — EXPERIMENTS.md §16 참고)."""
+    df_main_copy = df_main.copy()
+    df_main_copy['top_bottom'] = df_main_copy['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
+
+    tm_primary = build_trackman_lookup(df_trm, match_cols)
+    tr_final = pd.merge(df_main_copy, tm_primary, on=match_cols, how='left')
+    new_feature_cols = [col for col in tm_primary.columns if col not in match_cols]
+
+    if 'season' in match_cols:
+        fallback_cols = [c for c in match_cols if c != 'season']
+        missing = tr_final[new_feature_cols].isna().all(axis=1)
+        if missing.any():
+            tm_fallback = build_trackman_lookup(df_trm, fallback_cols)
+            fallback = pd.merge(df_main_copy, tm_fallback, on=fallback_cols, how='left')
+            tr_final.loc[missing, new_feature_cols] = fallback.loc[missing, new_feature_cols].values
+
+    # 훈련 시점 피처 통계 기반 결측치 보정 (fallback까지 실패한 잔여 결측값은 0으로 예외 처리 방어 조치)
+    tr_final[new_feature_cols] = tr_final[new_feature_cols].fillna(0)
+    return tr_final
+
+
 def main():
     # 대회 서빙 환경 표준 경로 정의
     DATA_DIR = "./data"
@@ -157,43 +217,10 @@ def main():
         bundle = pickle.load(f)
     mlp_bundle = bundle["mlp_bundle"]
 
-    # 3. 파이프라인 무결성 유지를 위한 트랙맨 전처리 수행 (train.py의 전처리 구조를 직접 복제)
-    df_main_copy = df_test.copy()
-    df_trm_copy = df_trm.copy()
-
-    # 전처리 결합 기준 컬럼 추출
-    match_cols = [dfc for dfc in df_main_copy.columns if (dfc in df_trm_copy.columns) and dfc != 'row_id']
-
-    # 과거 트랙맨 로그 기반 통계량 산출 (추론 시점이므로 과거 전체 데이터 활용)
-    grouped = df_trm_copy.groupby(match_cols + ['pitch_type_group', 'auto_pitch_type'])
-    grouped_phase1 = grouped[['rel_speed', 'spin_rate', 'induced_vert_break', 'horz_break', 'extension', 'rel_height', 'rel_side', 'zone_speed']].agg(['mean', 'std'])
-    grouped_phase2 = grouped_phase1.reset_index()
-
-    std_cols = [col for col in grouped_phase2.columns if 'std' in col]
-    grouped_phase2[std_cols] = grouped_phase2[std_cols].fillna(0)
-    grouped_phase2.columns = ['_'.join(col).strip('_') for col in grouped_phase2.columns]
-
-    grouped_phase3 = grouped_phase2.drop(columns='auto_pitch_type')
-    grouped_phase3 = grouped_phase3.groupby(match_cols + ['pitch_type_group']).agg(['mean'])
-
-    pivoted = grouped_phase3.unstack(level='pitch_type_group')
-    pivoted.columns = [f"{col[0]}_{col[1]}_{col[2]}" for col in pivoted.columns]
-    tm_final = pivoted.reset_index()
-    tm_final = tm_final.fillna(0)
-
-    # 데이터 타입 정밀 매칭 및 인코딩
-    df_main_copy['top_bottom'] = df_main_copy['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
-    tm_final['top_bottom'] = tm_final['top_bottom'].map({'Top': 0, 'Bottom': 1}).astype(np.int64)
-
-    for col in ['batter_hand', 'pitcher_hand']:
-        if col in tm_final.columns:
-            tm_final[col] = tm_final[col].map({'Left': 1, 'Right': 2}).astype(np.int64)
-
-    tr_final = pd.merge(df_main_copy, tm_final, on=match_cols, how='left')
-    new_feature_cols = [col for col in tm_final.columns if col not in match_cols]
-
-    # 훈련 시점 피처 통계 기반 결측치 보정 (추론 시점의 결측값은 0으로 예외 처리 방어 조치)
-    tr_final[new_feature_cols] = tr_final[new_feature_cols].fillna(0)
+    # 3. 파이프라인 무결성 유지를 위한 트랙맨 전처리 수행 (train.py의 전처리 구조를 직접 복제 +
+    # season fallback 추가 — EXPERIMENTS.md §16)
+    match_cols = [dfc for dfc in df_test.columns if (dfc in df_trm.columns) and dfc != 'row_id']
+    tr_final = merge_trackman_features(df_test, df_trm, match_cols)
 
     # 3.5 asof_* 및 카운트 정보를 조합한 파생 피처 추가 (code/train.py와 동일 정의)
     tr_final = add_engineered_features(tr_final, league_success_mean)

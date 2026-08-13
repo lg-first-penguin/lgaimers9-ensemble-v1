@@ -506,3 +506,37 @@ Full retrain으로 `submit/model/final_retained_model.pkl`도 갱신됨. 다만 
 §15.4에서 만든 `submit.zip`(quantile n_bins=24 반영 블렌드)을 실제 대회 대시보드에 제출. 결과: **957.80417점** — 로컬 홀드아웃(879.34) 대비 +78.5점 높게 나왔고, 이 아키텍처 도입 전 마지막 실제 제출 기록인 924점(알파 블렌드 시절, CLAUDE.md 참고)보다도 +33.8점 높다.
 
 로컬이 실제 리더보드를 과소평가해온 이 프로젝트의 반복 패턴(TABULAR_MLP_REPORT.md §4)이 이번에도 재현됐다 — 로컬 단일 시간분할(season==2024) 홀드아웃과 실제 평가 데이터(2025 시즌) 사이의 분포 차이가 매번 같은 방향(로컬이 낮게 나옴)으로 나타난다는 점은 이제 우연이라기보다 이 프로젝트의 검증 방식 자체의 구조적 특성으로 봐도 될 만큼 누적됐다. **결론: quantile (PLE) 수치형 임베딩 채택이 실제 리더보드에서도 확정적으로 검증됨.** 현재 프로덕션 모델 = CatBoost + (quantile embedding 적용) MLP 앙상블, 스태킹 메타모델 블렌드, 실제 대시보드 957.80417점.
+
+## 16. 트랙맨 매칭 'season' 등호 문제 — 실제 제출에서 64개 파생 피처가 상시 0으로 죽어있었음, fallback으로 수정
+
+957.80417점 제출 직후, 트랙맨 병합 로직을 다시 들여다보다 발견한 문제. `process_trackman_features_safe`의 `match_cols`(10개: `season`, `game_month`, `game_dayofweek`, `inning`, `top_bottom`, `balls_before`, `strikes_before`, `outs_before`, `pitcher_hand`, `batter_hand`)에 `season`이 포함돼 있는데, **실제 평가 데이터(`test.csv`)는 항상 season==2025이고 `trackman_history.csv`는 2019~2024만 있다.** `season` 등호 조건 때문에 실제 제출 시 매칭이 구조적으로 100% 실패한다.
+
+로컬의 5행짜리 포맷 확인용 `test.csv`(season 전부 2025)로 직접 재현:
+
+```
+trackman season range: 2019 ~ 2024
+test season values: [2025]
+트랙맨-파생 피처 개수: 64
+전체 test 행 5개 중 트랙맨 매칭 전부 실패(전체 NaN)한 행: 5개  (100%)
+```
+
+즉 실제 대시보드 제출(245,789개 샘플) 전체에서 64개 트랙맨 파생 피처가 전부 상수 0이었다(`submit/script.py`의 `fillna(0)` 방어 처리 덕에 크래시는 안 났지만, 해당 피처 블록이 완전히 죽은 채로 957.80417점이 나온 것).
+
+**왜 로컬 검증이 못 잡았나**: 로컬 홀드아웃은 `season==2024`인데 트랙맨 데이터의 최대 시즌도 2024라서, 로컬 val 행은 실제로 매칭이 된다. 즉 지금까지의 모든 로컬 검증(§14.1의 트랙맨 fingerprint coarsening 실험 포함)은 "트랙맨이 val 시즌을 볼 수 있는" 조건에서 측정된 것이라, 실제 배포 조건(트랙맨이 eval 시즌을 원천적으로 볼 수 없음)과 다르다. §14.1의 "세분화가 이미 최적"이라는 결론 자체는 그 조건 안에서는 유효하지만, 실제 배포에서는 애초에 매칭이 안 되므로 그 결론이 실제 배포 성능에 얼마나 기여했는지는 별개 문제다.
+
+### 16.1 로컬 시뮬레이션으로 fallback 효과 검증
+
+`code/experiment_trackman_season_fallback.py`로 실제 배포 조건을 흉내냈다: 로컬 val(season==2024) 피처를 만들 때 `trackman_history.csv`에서 `season==2024` 데이터를 통째로 제거(1,793,078 → 1,458,852행, 남은 시즌 2019~2023)해 "트랙맨이 eval 시즌을 못 보는" 실제 상황을 재현하고, 재학습 없이 `open/reference/best_model.pkl`(CatBoost+MLP+메타모델)을 그대로 불러와 세 가지 조건을 비교했다:
+
+| 조건 | 트랙맨 피처 전부 0인 행 비율 | CatBoost | MLP | Blend |
+| --- | --- | --- | --- | --- |
+| as-is (참고, 트랙맨이 2024 포함 — 지금까지의 모든 로컬 검증 조건) | 1.5% | 820.42 | 837.62 | **880.38** |
+| broken (season 포함 10-key, 실제 2025 제출 상황 재현) | 100% | 711.27 | 735.43 | **730.25** |
+| fallback (season 등호 실패 시 season 제외 9-key로 재매칭) | 2.9% | 670.35 | 731.92 | **752.42** |
+
+- **broken vs as-is**: delta −150.14. 트랙맨이 eval 시즌을 못 보게 되는 것만으로 로컬 기준 150점 가까이 잃는다 — §14.1에서 매칭 키 1개만 성기게 해도(9-key, 여전히 실제 매칭은 됨) CatBoost 단독 -118.81이 났던 것과 같은 방향(트랙맨 파생 피처가 실제로 큰 비중을 차지한다는 뜻)이고, 완전히 죽이면 그보다도 더 크게 손해를 본다.
+- **fallback vs broken**: delta **+22.17**. season을 뺀 9-key 재매칭이 97.1%의 행을 복구했고(2.9%만 잔여 미매칭), 시뮬레이션 기준으로 확실한 순이득을 보였다. season 등호 없이 5개 시즌(2019~2023)을 한데 묶어 집계하다 보니 as-is(같은 시즌만 매칭)만큼 정밀하진 않아 이론적 상한(+150.14) 전부를 회복하진 못했지만, 방향과 크기 모두 채택할 만한 수준.
+
+**리크 안전성**: 이 fallback은 **추론 전용 코드(`submit/script.py`)에만** 적용했다 — `code/train.py::process_trackman_features_safe`(학습/검증 피처 생성)는 그대로 둔다. 평가 시점의 season(2025)은 `trackman_history.csv`가 커버하는 모든 시즌(2019~2024)보다 항상 미래이므로 season을 빼고 매칭해도 미래 정보가 섞일 위험이 없지만, 학습 시점에는 이전 시즌 행이 이후 시즌 트랙맨 데이터를 보게 되는 진짜 리크가 생길 수 있다(현재 `season` 등호가 사실상 유일한 시간 리크 방지 장치 — `is_train_split`의 글로벌 시간 필터는 이미 무력하다는 게 문서화돼 있었음, CLAUDE.md 참고). 그래서 재학습은 필요 없다 — `submit/model/final_retained_model.pkl`은 그대로 두고 `submit/script.py`의 추론 로직만 수정했다.
+
+**결론: 채택.** `submit/script.py::merge_trackman_features`에 season fallback을 구현했다(`build_trackman_lookup` 헬퍼로 분리해 1차 10-key 매칭 실패 행에 한해 2차 9-key 매칭). 행 독립성(대회 규칙 핵심 원칙 — 어떤 행의 예측값은 다른 test.csv 행의 존재 여부와 무관해야 함)도 재검증했다 — fallback도 `trackman_history.csv`(공식 데이터)만 조회하는 룩업이라 여전히 행 단위로 독립적임을 "행 1개짜리 test.csv vs 전체 test.csv" 비교로 확인(최대 오차 1.4e-08, 부동소수점 수준). 모델 재학습 없이 `submit.zip`만 재빌드해 제출 가능. 실제 리더보드에서 이 fallback이 로컬 시뮬레이션(+22.17)만큼, 혹은 이 프로젝트의 "로컬이 실제를 과소평가" 패턴을 감안하면 그 이상 개선될 가능성이 있다 — 아직 실제 제출로 확정 검증되지 않음, 다음 제출로 확인 필요.
