@@ -100,21 +100,25 @@ def main():
     from code.catboost_model import train_catboost, DEFAULT_FULL_RETRAIN_ITERATIONS
     from code.blend_model import make_blend_bundle
 
-    # reference 번들이 현재 블렌드 포맷("catboost_model"+"mlp_bundle")이면 MLP 멤버별 best_epoch,
-    # CatBoost best_iteration, blend alpha를 그대로 재사용하고, 구버전/레거시 포맷이면
-    # 전부 기본값으로 재학습합니다 (alpha는 이 경우 0.5로 폴백).
+    # reference 번들이 현재 스태킹 포맷("catboost_model"+"mlp_bundle"+"meta_model")이면 MLP
+    # 멤버별 best_epoch, CatBoost best_iteration, 메타모델 가중치를 그대로 재사용하고,
+    # 구버전/레거시 포맷(alpha 가중평균 시절 포함)이면 전부 기본값으로 재학습합니다.
     is_blend_ref = (
         isinstance(best_bundle, dict) and "mlp_bundle" in best_bundle and "catboost_model" in best_bundle
+        and "meta_model" in best_bundle
         and len(best_bundle["mlp_bundle"].get("members", [])) == len(ENSEMBLE_SEEDS)
     )
     if is_blend_ref:
         per_seed_epochs = [m.get("best_epoch") or DEFAULT_FULL_RETRAIN_EPOCHS for m in best_bundle["mlp_bundle"]["members"]]
         ref_catboost_best_iteration = best_bundle.get("catboost_best_iteration") or DEFAULT_FULL_RETRAIN_ITERATIONS
-        blend_alpha = best_bundle["alpha"]
+        blend_meta_model = best_bundle["meta_model"]
     else:
         per_seed_epochs = [DEFAULT_FULL_RETRAIN_EPOCHS] * len(ENSEMBLE_SEEDS)
         ref_catboost_best_iteration = DEFAULT_FULL_RETRAIN_ITERATIONS
-        blend_alpha = 0.5
+        # 폴백 기본값 (거의 사용되지 않음 — NEW_BEST가 항상 우선 승격되므로 이 분기는
+        # reference가 이미 호환 포맷일 때만 도달하지 않고, 다음 dopip.py 실행에서
+        # 재학습된 메타모델로 즉시 갱신됨)
+        blend_meta_model = {"w_cat": 1.0, "w_mlp": 1.0, "intercept": 0.0}
 
     DATA_DIR = "./open/data"
     train_df_raw = pd.read_csv(os.path.join(DATA_DIR, "train.csv"), encoding="utf-8-sig")
@@ -163,9 +167,9 @@ def main():
     X_full_raw, y_full_raw = train_df[full_features], train_df[TARGET_COL].values
     final_catboost_model, _ = train_catboost(X_full_raw, y_full_raw, iterations=catboost_full_iterations, verbose=True)
 
-    final_bundle = make_blend_bundle(final_catboost_model, final_mlp_bundle, blend_alpha)
+    final_bundle = make_blend_bundle(final_catboost_model, final_mlp_bundle, blend_meta_model)
     final_bundle["catboost_best_iteration"] = catboost_full_iterations
-    print(f"[Full Retrain] 최종 블렌드 번들 구성 완료 (alpha={blend_alpha:.2f})")
+    print(f"[Full Retrain] 최종 블렌드 번들 구성 완료 (meta_model={blend_meta_model})")
 
     FINAL_SUBMIT_MODEL_PATH = "./submit/model/final_retained_model.pkl"
     os.makedirs(os.path.dirname(FINAL_SUBMIT_MODEL_PATH), exist_ok=True)

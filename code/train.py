@@ -15,7 +15,7 @@ import pandas as pd
 
 from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, embed_dim_for_cardinality, fit_preprocessing, apply_preprocessing, to_tensors, train_ensemble, make_bundle, predict_bundle, get_device
 from code.catboost_model import train_catboost, predict_catboost
-from code.blend_model import sweep_alpha, make_blend_bundle
+from code.blend_model import fit_meta_model, make_blend_bundle
 
 def process_trackman_features_safe(df_main, df_trm, is_train_split=True):
     """타임 리크가 차단된 10-Key 상황 지문 기반 트랙맨 전처리 결합 엔진"""
@@ -146,16 +146,17 @@ def main():
 
     mlp_val_preds = predict_bundle(mlp_bundle, X_val_raw, device=device)
     cat_val_preds = predict_catboost(catboost_model, X_val_raw)
-    best_alpha, blend_score, blend_brier = sweep_alpha(cat_val_preds, mlp_val_preds, y_val_raw)
-    print(f"[Blend] 최적 alpha={best_alpha:.2f} (CatBoost 비중) | 블렌드 Val Score: {blend_score:.2f}")
+    w_cat, w_mlp, intercept, blend_score, blend_brier = fit_meta_model(cat_val_preds, mlp_val_preds, y_val_raw)
+    meta_model = {"w_cat": w_cat, "w_mlp": w_mlp, "intercept": intercept}
+    print(f"[Blend] 스태킹 메타모델 w_cat={w_cat:.3f} w_mlp={w_mlp:.3f} intercept={intercept:.3f} | 블렌드 Val Score: {blend_score:.2f}")
 
-    bundle = make_blend_bundle(catboost_model, mlp_bundle, best_alpha)
+    bundle = make_blend_bundle(catboost_model, mlp_bundle, meta_model)
     bundle["catboost_best_iteration"] = catboost_best_iteration
 
     os.makedirs("./open/temp", exist_ok=True)
     with open("./open/temp/latest_model.pkl", 'wb') as f:
         pickle.dump(bundle, f)
-    print(f"✅ Model saved to ./open/temp/latest_model.pkl (mlp best_epoch_avg={mlp_bundle['best_epoch_']}, catboost best_iteration={catboost_best_iteration}, alpha={best_alpha:.2f})")
+    print(f"✅ Model saved to ./open/temp/latest_model.pkl (mlp best_epoch_avg={mlp_bundle['best_epoch_']}, catboost best_iteration={catboost_best_iteration}, meta_model={meta_model})")
 
 if __name__ == "__main__":
     main()

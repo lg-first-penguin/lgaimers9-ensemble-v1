@@ -111,7 +111,7 @@ def main():
     league_success_mean = df_train_raw[TARGET_COL].mean()
 
     # 2. 저장된 최종 통합 완습 모델 번들 로드
-    # (dict: {"catboost_model": CatBoostClassifier, "mlp_bundle": {...}, "alpha": float})
+    # (dict: {"catboost_model": CatBoostClassifier, "mlp_bundle": {...}, "meta_model": {"w_cat", "w_mlp", "intercept"}})
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"❌ 제출 구조 내 모델 파일을 찾을 수 없습니다: {MODEL_PATH}")
 
@@ -192,9 +192,11 @@ def main():
             preds_list.append(model(X_cat, X_num).cpu().numpy())
     mlp_preds = np.mean(preds_list, axis=0)
 
-    # 5c. alpha * CatBoost + (1-alpha) * MLP 앙상블 가중 평균 블렌드
-    alpha = bundle["alpha"]
-    preds = alpha * cat_preds + (1 - alpha) * mlp_preds
+    # 5c. 스태킹 메타모델(로지스틱 회귀) 기반 CatBoost+MLP 비선형 결합
+    # code/blend_model.py::predict_meta 와 동일 로직 (수동 동기화 유지)
+    meta = bundle["meta_model"]
+    z = meta["w_cat"] * cat_preds + meta["w_mlp"] * mlp_preds + meta["intercept"]
+    preds = 1.0 / (1.0 + np.exp(-z))
 
     # 6. 제출 서식 동기화 및 저장
     df_sub[TARGET_COL] = preds

@@ -60,7 +60,7 @@ def main():
     print(f"{'[CatBoost + MLP 블렌드 검증 모델 성능 리포트]':^50}")
     print(f" Brier Skill Score (BSS): {latest_bss:.5f}")
     print(f" 대회 환산 예측 점수   : {latest_score:.2f}")
-    print(f" Blend alpha (CatBoost 비중): {latest_bundle.get('alpha'):.2f}")
+    print(f" Blend 메타모델: {latest_bundle.get('meta_model')}")
     print("="*60)
 
     # 2. 기존 최고 Reference 모델과 성능 대조
@@ -68,15 +68,15 @@ def main():
     if os.path.exists(REF_MODEL_PATH):
         with open(REF_MODEL_PATH, 'rb') as f:
             ref_bundle = pickle.load(f)
-        if isinstance(ref_bundle, dict) and "catboost_model" in ref_bundle and "mlp_bundle" in ref_bundle:
+        if isinstance(ref_bundle, dict) and "catboost_model" in ref_bundle and "mlp_bundle" in ref_bundle and "meta_model" in ref_bundle:
             ref_bss, ref_score = calculate_bss(ref_bundle, X_val, y_val)
             print(f" ➔ 기존 최고 Reference 모델 BSS: {ref_bss:.5f} (점수: {ref_score:.2f})")
         else:
-            # CatBoost 단독/MLP 단독 시절의 레거시 번들("catboost_model"+"mlp_bundle" 조합이
-            # 아닌 구버전)은 현재 블렌드 번들 포맷과 호환되지 않으므로 비교 없이 무시합니다.
-            # 이번 실행의 신규 모델이 그대로 NEW_BEST 로 승격되며, dopip.py가 기존 파일을
-            # open/former_model/ 로 자동 백업합니다.
-            print(" ⚠ 기존 Reference 모델이 현재 블렌드 번들 포맷이 아닙니다 (구버전 MLP/CatBoost 단독 레거시로 추정). 비교를 건너뛰고 신규 모델을 채택합니다.")
+            # CatBoost 단독/MLP 단독 시절의 레거시 번들, 또는 "alpha" 가중평균 시절의
+            # 구 블렌드 번들("meta_model" 키가 없는 버전)은 현재 스태킹 번들 포맷과
+            # 호환되지 않으므로 비교 없이 무시합니다. 이번 실행의 신규 모델이 그대로
+            # NEW_BEST 로 승격되며, dopip.py가 기존 파일을 open/former_model/ 로 자동 백업합니다.
+            print(" ⚠ 기존 Reference 모델이 현재 스태킹 번들 포맷이 아닙니다 (구버전 MLP/CatBoost 단독 또는 alpha 블렌드 레거시로 추정). 비교를 건너뛰고 신규 모델을 채택합니다.")
 
     with open("./open/temp/compare_result.txt", "w") as f:
         if latest_bss > ref_bss:
