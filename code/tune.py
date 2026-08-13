@@ -14,7 +14,8 @@ import pandas as pd
 import optuna
 from catboost import CatBoostClassifier, Pool
 
-from code.train import process_trackman_features_safe, add_engineered_features
+from code.train import apply_f1_filter, add_engineered_features
+from code.catboost_model import CAT_FEATURES
 
 N_TRIALS = int(os.environ.get("TUNE_TRIALS", 40))
 DATA_DIR = "./open/data"
@@ -30,11 +31,12 @@ def compute_bss(preds, y_val):
 
 
 def build_data():
+    """code/train.py::main()과 동일한 피처 구성(트랙맨 없음, F1 필터 적용,
+    season<2024 학습 / season==2024 검증)으로 CatBoost 튜닝용 Pool을 만든다."""
     df = pd.read_csv(os.path.join(DATA_DIR, "train.csv"))
-    df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"))
+    df["top_bottom"] = df["top_bottom"].map({"T": 0, "B": 1}).astype(np.int64)
 
-    tr_final, _ = process_trackman_features_safe(df, df_trm, is_train_split=True)
-    train_df = tr_final.dropna(subset=[TARGET_COL]).reset_index(drop=True)
+    train_df = df.dropna(subset=[TARGET_COL]).reset_index(drop=True)
 
     train_mask = train_df["season"] < 2024
     val_mask = train_df["season"] == 2024
@@ -44,21 +46,21 @@ def build_data():
 
     drop_cols = ["row_id", TARGET_COL]
     features = [col for col in train_df.columns if col not in drop_cols]
-    categorical_features = [
-        c for c in tr_final.select_dtypes(include="object").columns
-        if c != "row_id" and c in features
-    ]
 
-    for col in categorical_features:
+    for col in CAT_FEATURES:
         train_df[col] = train_df[col].astype(str).fillna("missing")
 
-    X_train = train_df.loc[train_mask, features]
-    y_train = train_df.loc[train_mask, TARGET_COL].values
-    X_val = train_df.loc[val_mask, features]
-    y_val = train_df.loc[val_mask, TARGET_COL].values
+    train_split = train_df.loc[train_mask, features + [TARGET_COL]].reset_index(drop=True)
+    val_split = train_df.loc[val_mask, features + [TARGET_COL]].reset_index(drop=True)
+    train_split = apply_f1_filter(train_split)
 
-    train_pool = Pool(data=X_train, label=y_train, cat_features=categorical_features)
-    val_pool = Pool(data=X_val, label=y_val, cat_features=categorical_features)
+    X_train = train_split[features]
+    y_train = train_split[TARGET_COL].values
+    X_val = val_split[features]
+    y_val = val_split[TARGET_COL].values
+
+    train_pool = Pool(data=X_train, label=y_train, cat_features=CAT_FEATURES)
+    val_pool = Pool(data=X_val, label=y_val, cat_features=CAT_FEATURES)
     return train_pool, val_pool, y_val
 
 

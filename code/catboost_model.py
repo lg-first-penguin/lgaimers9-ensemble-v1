@@ -1,9 +1,10 @@
 # code/catboost_model.py
 """CatBoost 학습/추론 공용 유틸리티 (Tabular MLP와의 블렌딩용).
 
-하이퍼파라미터는 EXPERIMENTS.md 2장의 Optuna 튜닝 결과(구 reference
-`open/former_model/former_best_model_v3.pkl`, 실측 BSS 환산 818.54)를
-`model.get_params()`로 그대로 추출한 값입니다 — 재현성을 위해 하드코딩.
+하이퍼파라미터는 `code/tune.py`(Optuna, 40 trials)를 트랙맨 제거 + F1 필터 적용된
+현재 프로덕션 피처 구성(season<2024 학습 / season==2024 검증)으로 재실행한 결과입니다
+— EXPERIMENTS.md §20. CatBoost 단독 기준 이전 하드코딩 값(689.35, 구 데이터 기준
+튜닝) 대비 +32.31(721.66)로, F1 필터로 학습 데이터가 바뀐 뒤 재튜닝한 것이 유효했습니다.
 
 CatBoostClassifier는 프로젝트 전용 클래스가 아니라 `catboost` 라이브러리가 제공하는
 클래스이므로, `submit/requirements.txt`에 `catboost`만 명시되어 있으면 `code/`
@@ -15,16 +16,17 @@ from catboost import CatBoostClassifier, Pool
 CAT_FEATURES = ["game_type", "base_state"]
 
 CATBOOST_PARAMS = dict(
-    learning_rate=0.05040411253232039,
-    depth=7,
-    l2_leaf_reg=3.14659036827521,
+    learning_rate=0.027468342653742282,
+    depth=6,
+    l2_leaf_reg=2.36118174482295,
     loss_function="Logloss",
-    border_count=106,
+    border_count=32,
     random_seed=42,
-    random_strength=3.715568024268865,
+    random_strength=9.996029894496754,
     eval_metric="BrierScore",
-    bagging_temperature=0.4609270457436248,
+    bagging_temperature=0.46568175434742154,
     bootstrap_type="Bayesian",
+    min_data_in_leaf=89,
     verbose=False,
 )
 
