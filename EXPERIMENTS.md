@@ -2,6 +2,8 @@
 
 `control_success` 예측 CatBoost 모델에 적용한 피처 엔지니어링과 하이퍼파라미터 튜닝 내역을 정리합니다. 기준은 이번 작업 시작 시점의 `open/reference/best_model.pkl` (BSS 0.00737 / 점수 736.61)입니다.
 
+> **참고**: 이 로그 전체를 관통하는 "왜" 서사는 `PROJECT_HISTORY.md`에 정리돼 있습니다. 아래 본문 곳곳에 남아있는 `TABULAR_MLP_REPORT.md` 인용은 그 문서가 존재하던 시점에 작성된 원문 그대로 남겨뒀지만(로그이므로 소급 수정하지 않음), 해당 문서는 `PROJECT_HISTORY.md`로 대체되어 삭제되었습니다 — `TABULAR_MLP_REPORT.md §N`을 보게 되면 `PROJECT_HISTORY.md`의 대응 절을 대신 참고하세요.
+
 ## 점수 변화 요약
 
 | 단계 | BSS | 환산 점수 | 비고 |

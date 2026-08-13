@@ -6,7 +6,7 @@ Tabular MLP 7-seed 앙상블 단독 789.58, 단순 가중 평균 블렌드(alpha
 두 모델 종류를 섞는 것만으로 각 단독 모델보다 유의미하게 높은 점수를 얻었습니다.
 이후 alpha 가중평균을 `[cat_pred, mlp_pred]` 2피처 로지스틱 회귀 메타모델(스태킹)로
 교체 — rolling-origin 3-fold 검증에서 alpha 블렌드 대비 전 fold 우세(평균 +14.22점)를
-확인하고 정식 반영. 자세한 내용은 TABULAR_MLP_REPORT.md, EXPERIMENTS.md §9 참고.
+확인하고 정식 반영. 자세한 내용은 PROJECT_HISTORY.md, EXPERIMENTS.md §9 참고.
 
 번들 스키마: {"catboost_model": <CatBoostClassifier>, "mlp_bundle": {...}, "meta_model": {"w_cat", "w_mlp", "intercept"}}
 - "catboost_model"은 `catboost` 라이브러리가 제공하는 클래스라 `code/` 패키지 없이도
