@@ -772,3 +772,33 @@ CatBoost(GBDT)+MLP(concat) 2-way 스태킹에 구조적으로 다른 계열(피�
 **추정 원인**: ExcelFormer의 예측이 CatBoost/MLP와 상관계수 0.88~0.93으로 이미 높은 상태에서, 3-피처 로지스틱 회귀를 시즌 하나짜리 검증셋(24.5만~25.3만 행)에 매번 새로 피팅한다. 상관이 높은 피처들의 회귀 계수는 다중공선성 때문에 표본에 따라 부호까지 흔들릴 수 있다 — 실제로 h2023 1-seed 실행에서는 ExcelFormer 가중치가 음수(−1.72, 오차 보정 신호)였는데 7-seed 실행에서는 양수(+1.19)로 바뀌었다. 즉 attention 모델 자체의 품질 문제라기보다, "이미 상관 높은 3번째 피처를 작은 검증셋 하나로 스태킹"하는 절차 자체가 원래 불안정하다는 뜻으로 보인다.
 
 **결론: 드롭.** FT-Transformer/ExcelFormer 둘 다 프로덕션에 편입하지 않는다. `code/ft_transformer_model.py`, `code/excelformer_model.py`, `code/experiment_attention.py`는 실험 스크립트/재사용 가능 인프라로 보관한다(버그 수정된 `batched_forward`는 향후 어텐션 계열을 다시 시도할 때도 유효).
+
+### 24.6 메타모델 검증 방식 자체를 고쳐 재검증 — 정규화(LogisticRegressionCV) + rolling-origin 3-fold, 그래도 드롭 재확인
+
+§24.5의 원인 분석("ExcelFormer 예측이 CatBoost/MLP와 상관 0.88~0.93으로 이미 높은 상태에서, 시즌 하나짜리 검증셋에 3-피처 로지스틱 회귀를 매번 새로 피팅하니 다중공선성으로 계수 부호까지 흔들린다")이 맞다면, 검증 절차 자체를 고치면 숨어 있던 진짜 신호가 드러날 수도 있다는 가설을 세워 재검증했다.
+
+**코드 변경**:
+- `code/experiment_3way_stack.py::fit_meta_model_n`: `LogisticRegression()`(C=1.0 고정) → `LogisticRegressionCV(cv=5, Cs=10)`로 교체, 정규화 강도를 내부 5-fold CV가 직접 고르게 함.
+- `code/experiment_attention.py`: `--foldcheck` 옵션 추가(`run_foldcheck()`) — `code/experiment_3way_stack.py::step_foldcheck`/§9.1과 동일한 `FOLD_BOUNDARIES=[(5,6),(7,8),(9,10)]` 월 버킷 확장 윈도우로, season==2024 안에서 2-way vs 3-way 스태킹을 재검증한다(시즌 2개짜리 point-check보다 표본이 많은 out-of-sample 검증).
+
+**결과** (`python -m code.experiment_attention --model excel --holdout 2024 --ensemble --foldcheck`, F1 필터 ON, EXCEL 7-seed 학습 6184.8s):
+
+| 모델 | solo 점수 | corr(vs CatBoost) | corr(vs MLP) |
+| --- | --- | --- | --- |
+| CatBoost | 721.66 | — | — |
+| MLP(7-seed) | 755.36 | — | — |
+| ExcelFormer(7-seed) | 538.76 | 0.9165 | 0.8429 |
+
+2-way(CatBoost+MLP) Blend=782.42, 3-way(season 전체로 메타모델 한 번 피팅)=789.30(+6.88, weight_excel=−0.434) — 다만 이 +6.88은 메타모델을 season==2024 전체로 학습하고 같은 season==2024로 평가한 것이라 사실상 인샘플에 가깝다(§24.5가 겪었던 것과 같은 함정 구조).
+
+rolling-origin 3-fold(진짜 out-of-sample — 각 fold는 그 fold 이전 월들로만 메타모델을 재학습):
+
+| val 구간 | n_train | n_val | 2-way | 3-way(+EXCEL) | delta |
+| --- | --- | --- | --- | --- | --- |
+| 5~6월 | 54,949 | 88,592 | 945.78 | 804.83 | **−140.95** |
+| 7~8월 | 143,541 | 74,990 | 752.36 | 719.02 | −33.35 |
+| 9~10월 | 218,531 | 34,976 | 326.82 | 329.70 | +2.88 |
+
+**1/3 fold 승리, 평균 delta −57.14.**
+
+**결론**: 다중공선성을 완화하는 정규화(`LogisticRegressionCV`)를 적용하고, 시즌 2개짜리 point-check 대신 진짜 rolling-origin fold로 검증해도 3-way 스태킹 이득은 살아나지 않고 오히려 뚜렷하게 마이너스로 나온다. "검증 절차의 불안정성이 진짜 신호를 가렸을 수도 있다"는 가설은 기각됐다 — 절차를 고쳤더니 오히려 더 명확하게 손해라는 게 드러났다. **드롭 결정 재확인, 최종.**
