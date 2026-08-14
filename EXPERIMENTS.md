@@ -695,4 +695,80 @@ season==2024, F1 미적용 기준: **asof9key 804.04** (CatBoost 724.10, MLP 780
 
 로컬 season==2024 단일 홀드아웃(794.77)만 보면 §15.5의 879.34보다 오히려 낮아 보이지만, §17.3/§18.3/§19에서 반복 확인했듯 이 로컬 수치는 이번 변경들의 진짜 효과를 보여주는 지표가 아니다(트랙맨 드롭·F1 필터의 순효과는 season==2024 단일 지표로는 과소평가되거나 방향이 뒤집혀 보일 수 있다는 게 §18.1 이후 이 세션 전체의 핵심 발견이었다). 실제 리더보드가 오히려 더 높게 나온 것은, 로컬이 실제 성능을 과소평가해온 이 프로젝트의 반복 패턴(TABULAR_MLP_REPORT.md §4, §15.5)과도, 그리고 트랙맨 버그가 실제로 죽어있던 64개 피처였다는 §16의 발견과도 일치한다 — 이번 제출은 그 죽은 피처들을 걷어내고 F1 필터로 오염 구간까지 정리한 뒤 나온 결과이므로, 971점은 트랙맨/F1/재튜닝 세 변경의 종합 실사용 효과를 실제 데이터로 확인한 것으로 본다.
 
+## 23. 트랙맨 재도입 4차 시도 — '배경 상황(context)' 뭉뚱그린 집계, 2023+2024 평균 사실상 0 (재확인, 드롭 유지)
+
+§17에서 트랙맨을 완전히 드롭한 뒤, 사용자가 근본적으로 다른 설계를 제안했다: 정밀 매칭 대신 **볼/스트라이크/아웃카운트 + 시즌구간(초/중/후반) + 좌우타/좌우투**로만 뭉뚱그려 그룹핑하고, 그룹별로 [rel_speed, spin_rate, induced_vert_break, horz_break, extension, rel_height, rel_side, zone_speed] 8개 물리 지표와 신규 피처 `stint_pitch_no`(경기 내 투수 교체 시마다 1로 재시작하는 등판 내 투구수, "이 상황이 보통 몇 구째쯤 나오는가"라는 피로도 근사치)의 mean/std를 냈다(`code/experiment_trackman_context.py`).
+
+이전 시도들(§14 상황 지문 조인, §17.2 asof9key 9-key 정밀 매칭)과의 핵심 차이:
+- 시즌을 정확한 `game_month`가 아니라 3구간(early=3~5월/mid=6~8월/late=9~11월)으로 뭉개, test.csv(항상 2025)가 trackman_history의 2019~2024 중 아무 시즌에서나 자연스럽게 매칭되게 함 — season 등호 skew(§16) 문제가 애초에 구조적으로 생기지 않도록 설계.
+- `pitch_type_group`/`auto_pitch_type`로 피벗하지 않고 상황 전체를 하나로 묶어 집계(§17.2는 64개 컬럼으로 피벗해 상황별 표본을 잘게 쪼갰음).
+- trackman_history.csv에 `base_state`/`runner_on_*` 컬럼이 없어 주자상황은 애초에 그룹핑 키에 넣을 수 없었다(데이터에 없는 정보).
+- season asof 컷오프(학습 행은 season<=그 행의 season, 검증/배포는 season<=2024)는 §17.2와 동일하게 유지해 미래 정보 leak 방지.
+
+동일한 재튜닝된 CatBoost 파라미터·F1 필터로 컨텍스트 피처 유무만 격리해 2023/2024 양쪽 홀드아웃으로 검증했다(`--no-context` 플래그로 기준선 재현):
+
+| | 2024 ctx=OFF | 2024 ctx=ON | Δ | 2023 ctx=OFF | 2023 ctx=ON | Δ | 평균 Δ |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| CatBoost | 721.66 | 763.98 | **+42.32** | 541.91 | 535.94 | −5.97 | **+18.18** |
+| MLP | 759.80 | 780.39 | +20.59 | 545.85 | 513.49 | **−32.36** | −5.89 |
+| Blend | 792.93 | 809.75 | +16.82 | 558.97 | 538.33 | **−20.64** | **−1.91** |
+
+2024만 보면 CatBoost·MLP·Blend 전부 뚜렷한 개선처럼 보이지만(+16.82~+42.32), 2023에서 전부 역전된다(−5.97~−32.36). 이번에도 §17.3에서 봤던 것과 정확히 같은 패턴 — 서로 다른 3번째 설계(정밀 조인 → 9-key asof → 뭉뚱그린 context 집계)로 3번 반복 확인했으니 개별 시즌 결과가 노이즈라는 결론이 더 굳어진다. 최종 채택 지표인 **Blend의 2023+2024 평균 Δ는 −1.91로 사실상 0** — §17.3의 asof9key(−1.35)와 같은 수준.
+
+흥미로운 점 하나: CatBoost 단독 평균 Δ는 +18.18로 순양이다(MLP만 −5.89로 순음, 블렌드를 깎아먹음). 즉 CatBoost는 이 컨텍스트 피처에서 뭔가 durable한 걸 뽑아내고 MLP는 못 뽑아내는 것처럼 보인다. 그러나 (a) 현재 파이프라인은 두 모델이 피처셋을 공유하는 구조라 모델별로 다른 피처셋을 주려면 구조 변경이 필요하고, (b) +18.18은 이 프로젝트에서 반복 관찰된 시즌 간 변동폭(±20~40)에 비해 두드러지게 크지 않다 — 그래서 이번 세션에서는 추가로 파고들지 않고 기록만 남긴다.
+
+**결론: 드롭 유지.** 프로덕션 파이프라인은 변경하지 않는다. `code/experiment_trackman_context.py`는 실험 스크립트로 보관.
+
 **결론**: 트랙맨 완전 제거, F1 필터, CatBoost 재튜닝 모두 실제 리더보드에서 최종 확정됐다. 현재 프로덕션 모델 = CatBoost(재튜닝) + MLP 앙상블(quantile embedding) 스태킹 블렌드, 트랙맨 미사용, F1 필터 적용, 실제 대시보드 971점.
+
+## 24. 세 번째 모델(attention) 스크리닝 — FT-Transformer/ExcelFormer, 단일 시드는 유망했으나 7-seed 앙상블에서 노이즈로 판명 (드롭)
+
+CatBoost(GBDT)+MLP(concat) 2-way 스태킹에 구조적으로 다른 계열(피처-간 self-attention)을 3번째로 추가하면 이질성이 늘어 스태킹 이득이 있을지 스크리닝했다(사용자가 다른 AI의 추천표를 근거로 FT-Transformer/ExcelFormer/AMFormer 등을 제안, 둘 다 구현해 비교하기로 결정).
+
+### 24.1 구현
+
+- `code/ft_transformer_model.py`: FT-Transformer(Gorishniy et al. 2021). 범주형은 `nn.Embedding(card+2, d_token)`, 수치형은 `code/mlp_model.py::QuantileEmbedding`과 동일한 PLE 로직이지만 flatten하지 않고 `(batch, num_numeric, d_token)`으로 유지하는 `NumericTokenizer`. 학습 가능한 [CLS] 토큰 + 표준 Transformer 인코더(pre-norm, GELU FFN, d_token=32, 3 layer, 8 head) + `Linear(d_token,1)+Sigmoid`.
+- `code/excelformer_model.py`: ExcelFormer(Chen et al. 2023) **근사** 구현. 논문 전체(특히 beta-mixup 증강, AFI 상호작용 레이어)는 재현하지 않고, 핵심 아이디어인 semi-permeable attention만 근사했다 — CatBoost `get_feature_importance()`로 피처 중요도 랭킹을 매기고, 토큰 i는 자신/CLS/자신보다 같거나 중요한 토큰에만 attend하도록 가산(additive) 마스크를 씌운다(정보가 "덜 중요 → 더 중요" 방향으로만 흐르게 제한해 oversmoothing 억제).
+- 둘 다 `code/mlp_model.py`의 전처리 유틸(`fit_preprocessing`/`apply_preprocessing`/`to_tensors`/`fit_quantile_edges`)을 그대로 재사용, TabularMLP와 동일한 early-stopping(Val Brier, patience 7) + 시드 앙상블(`ENSEMBLE_SEEDS`) 패턴을 따른다.
+
+### 24.2 버그 두 개 (구현 과정에서 발견/수정)
+
+1. **`code/experiment_3way_stack.py`의 죽은 import**: 트랙맨 제거 세션(§17) 때 삭제된 `process_trackman_features_safe`를 여전히 import하고 있어 그 파일의 `fit_meta_model_n`(N-피처 스태킹 메타모델)을 재사용하려는 순간 `ImportError`. `add_engineered_features`만 남기고 정리.
+2. **어텐션 모델의 검증/추론이 배치 없이 통째로 forward되는 버그**: `train_ft`/`train_excel`이 매 epoch 검증 시 `X_val_cat`/`X_val_num` 전체(holdout=2024면 253,507행)를 한 번에 forward했다. self-attention의 forward 메모리는 O(batch·heads·seq²)로 스케일해서, seq=60(1 CLS+7 cat+52 num) 기준 253,507행을 한 번에 넣으면 이론상 약 29GB가 필요하다 — 마스크 없는 FT-Transformer는 이 GPU(로컬 8GB)에서 우연히 PyTorch의 fused/flash 커널 경로를 타 통과했지만, 커스텀 `attn_mask`를 쓰는 ExcelFormer는 느린 경로로 빠지며 실제로 `Tried to allocate 27.20 GiB` OOM이 났다. **실전 배포(24.6만 행 test.csv 추론)에서도 똑같이 터질 수 있는 잠재 버그**였다. `code/ft_transformer_model.py::batched_forward()`(청크 단위 `torch.no_grad()` forward)를 추가해 두 모델의 검증/앙상블 추론(`predict_ft_ensemble`/`predict_excel_ensemble`) 모두에 적용해 수정.
+
+### 24.3 단일 시드 스크리닝 (season==2024)
+
+같은 조건(F1 필터 ON, 트랙맨 미사용, 재튜닝 CatBoost)에서 solo 성능과 기존 두 모델과의 예측 상관계수를 봤다(`code/experiment_attention.py`).
+
+| 모델 | solo 점수 | corr(vs CatBoost) | corr(vs MLP) |
+| --- | --- | --- | --- |
+| CatBoost | 721.66 | — | — |
+| MLP(7-seed) | 769.23 | — | — |
+| FT-Transformer(1 seed) | 589.35 | 0.8714 | 0.8309 |
+| ExcelFormer(1 seed) | 538.21 | 0.8739 | 0.8321 |
+
+두 attention 모델 다 solo 성능이 CatBoost/MLP보다 130~230점 낮다. 상관계수는 CatBoost-MLP 자체 상관(~0.999, §6)보다는 뚜렷이 낮아 구조적 독립성은 있어 보였다.
+
+### 24.4 3-way 스태킹 이득 — 단일 시드는 두 시즌 모두 양수(트랙맨과 다른 패턴)
+
+`code/experiment_3way_stack.py::fit_meta_model_n`으로 [CatBoost, MLP, attention] 3-피처 로지스틱 회귀를 매 홀드아웃에서 새로 학습해 2-way 대비 이득을 측정했다. (초기 구현은 MLP 비교 대상으로 프로덕션 reference bundle을 재사용했는데, holdout=2023에서는 그 bundle이 이미 season==2023을 학습에서 본 상태라 in-sample 평가가 되어 MLP=1403.42라는 비정상 값이 나왔다 — MLP도 매 holdout 전용으로 7-seed 새로 학습하도록 수정 후 재실행.)
+
+| 모델 | 2024 Δ | 2023 Δ | 평균 Δ |
+| --- | --- | --- | --- |
+| FT-Transformer(1 seed) | −1.14 | +8.55 | +3.71 |
+| ExcelFormer(1 seed) | +3.39 | +25.56 | **+14.48** |
+
+트랙맨 실험들과 달리 부호가 두 시즌 모두 양수였다(FT도 +3.71, ExcelFormer는 +14.48로 CatBoost 재튜닝의 블렌드 이득(+17.16, §21)과 맞먹는 규모). 유망해 보여 ExcelFormer를 7-seed 앙상블로 확장해 재검증했다.
+
+### 24.5 7-seed 앙상블 재검증 — 이득이 홀드아웃 간 부호가 뒤집힘, 노이즈로 판정 (드롭)
+
+| | 2024 Δ | 2023 Δ | 평균 Δ |
+| --- | --- | --- | --- |
+| ExcelFormer 1-seed | +3.39 | +25.56 | +14.48 |
+| ExcelFormer 7-seed | **+25.63** | **−20.53** | +2.55 |
+
+2024는 이득이 오히려 더 커졌지만(+3.39→+25.63), 2023은 완전히 뒤집혔다(+25.56→−20.53, 46점 차) — solo 점수는 이 홀드아웃에서 앙상블로 실제 개선됐음에도(323.89→424.42) 스태킹 이득은 정반대로 갔다. 앙상블 평균(+2.55)은 단일 시드 평균(+14.48)의 5분의 1 수준으로 쪼그라들었고, 이 프로젝트에서 반복 관찰된 시즌 간 변동폭(±20~40) 안에 들어간다 — 즉 신호가 아니라 노이즈일 가능성이 높다.
+
+**추정 원인**: ExcelFormer의 예측이 CatBoost/MLP와 상관계수 0.88~0.93으로 이미 높은 상태에서, 3-피처 로지스틱 회귀를 시즌 하나짜리 검증셋(24.5만~25.3만 행)에 매번 새로 피팅한다. 상관이 높은 피처들의 회귀 계수는 다중공선성 때문에 표본에 따라 부호까지 흔들릴 수 있다 — 실제로 h2023 1-seed 실행에서는 ExcelFormer 가중치가 음수(−1.72, 오차 보정 신호)였는데 7-seed 실행에서는 양수(+1.19)로 바뀌었다. 즉 attention 모델 자체의 품질 문제라기보다, "이미 상관 높은 3번째 피처를 작은 검증셋 하나로 스태킹"하는 절차 자체가 원래 불안정하다는 뜻으로 보인다.
+
+**결론: 드롭.** FT-Transformer/ExcelFormer 둘 다 프로덕션에 편입하지 않는다. `code/ft_transformer_model.py`, `code/excelformer_model.py`, `code/experiment_attention.py`는 실험 스크립트/재사용 가능 인프라로 보관한다(버그 수정된 `batched_forward`는 향후 어텐션 계열을 다시 시도할 때도 유효).
