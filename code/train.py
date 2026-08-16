@@ -71,8 +71,14 @@ def main():
 
     train_df = df.dropna(subset=[target_col]).reset_index(drop=True)
 
-    train_mask = train_df['season'] < 2024
-    val_mask = train_df['season'] == 2024
+    # ABS(자동 볼 판정 시스템) 레짐 시프트 가설 검증(EXPERIMENTS.md §35) 결과 채택:
+    # 2024시즌부터 KBO가 ABS를 전면 도입해 2019~2023(구 판정체계) 데이터만으로는
+    # 2024/2025(신 판정체계)를 예측하기 어렵다는 가설을, 학습에 2024 초반(3~6월)을
+    # 일부 포함시켜 검증했다. cutoff=7(7월부터 검증)이 여러 cutoff(4~10) 중 블렌드
+    # 기준 가장 크고 신뢰할 만한 이득(+58.03)을 보여 채택. 가중치(sample_weight)는
+    # 표본이 큰 cutoff에서 오히려 baseline보다 나빠 불채택(weight=1 유지).
+    train_mask = (train_df['season'] < 2024) | ((train_df['season'] == 2024) & (train_df['game_month'] < 7))
+    val_mask = (train_df['season'] == 2024) & (train_df['game_month'] >= 7)
 
     league_success_mean = train_df.loc[train_mask, target_col].mean()
     train_df = add_engineered_features(train_df, league_success_mean)
@@ -84,7 +90,7 @@ def main():
     train_split = train_df.loc[train_mask, features + [target_col]].reset_index(drop=True)
     val_split = train_df.loc[val_mask, features + [target_col]].reset_index(drop=True)
     train_split = apply_f1_filter(train_split)
-    print(f"훈련 데이터 (2019~2023, F1 필터 적용): {len(train_split)} 행 | 검증 데이터 (2024): {len(val_split)} 행")
+    print(f"훈련 데이터 (2019~2023 + 2024 3~6월, F1 필터 적용): {len(train_split)} 행 | 검증 데이터 (2024 7~10월): {len(val_split)} 행")
 
     train_proc, cat_encoder, num_imputer, num_scaler, cat_dims = fit_preprocessing(train_split, CAT_COLS, num_cols)
     val_proc = apply_preprocessing(val_split, CAT_COLS, num_cols, cat_encoder, num_imputer, num_scaler)

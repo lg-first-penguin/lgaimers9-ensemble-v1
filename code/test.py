@@ -37,15 +37,16 @@ def main():
 
     train_df = df.dropna(subset=[TARGET_COL]).reset_index(drop=True)
 
-    # train.py와 동일하게 train-split(season<2024) 기준 리그 평균으로 파생 피처 산출
-    train_mask = train_df['season'] < 2024
+    # train.py와 동일한 분할(EXPERIMENTS.md §35 ABS 레짐 시프트, cutoff=7 채택)을 그대로 재현한다.
+    # 학습 = season<2024 + (season==2024 & game_month<7), 검증 = season==2024 & game_month>=7
+    train_mask = (train_df['season'] < 2024) | ((train_df['season'] == 2024) & (train_df['game_month'] < 7))
     league_success_mean = train_df.loc[train_mask, TARGET_COL].mean()
     train_df = add_engineered_features(train_df, league_success_mean)
 
     features = [col for col in train_df.columns if col not in [ID_COL, TARGET_COL]]
 
-    # 2024년 데이터는 학습에서 완전히 제외하고 검증셋으로만 사용
-    val_split = train_df[train_df['season'] == 2024].reset_index(drop=True)
+    # 2024년 7~10월만 학습에서 제외하고 검증셋으로 사용 (3~6월은 학습에 포함됨 — train.py와 동일)
+    val_split = train_df[(train_df['season'] == 2024) & (train_df['game_month'] >= 7)].reset_index(drop=True)
 
     X_val, y_val = val_split[features], val_split[TARGET_COL].values
 
