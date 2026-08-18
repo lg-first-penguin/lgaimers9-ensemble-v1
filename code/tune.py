@@ -9,13 +9,11 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 import json
-import numpy as np
-import pandas as pd
 import optuna
 from catboost import CatBoostClassifier, Pool
 
-from code.train import apply_f1_filter, add_engineered_features
 from code.catboost_model import CAT_FEATURES
+from code.experiment_residual_correction_9_10 import build_split
 
 N_TRIALS = int(os.environ.get("TUNE_TRIALS", 40))
 DATA_DIR = "./open/data"
@@ -31,32 +29,18 @@ def compute_bss(preds, y_val):
 
 
 def build_data():
-    """code/train.py::main()과 동일한 피처 구성(트랙맨 없음, F1 필터 적용,
-    season<2024 학습 / season==2024 검증)으로 CatBoost 튜닝용 Pool을 만든다."""
-    df = pd.read_csv(os.path.join(DATA_DIR, "train.csv"))
-    df["top_bottom"] = df["top_bottom"].map({"T": 0, "B": 1}).astype(np.int64)
+    """현재 프로덕션(tier A 포함) 피처/분할 구성으로 CatBoost 튜닝용 Pool을 만든다.
 
-    train_df = df.dropna(subset=[TARGET_COL]).reset_index(drop=True)
+    참고: `TIER_FEED = {"a": "mlp"}`는 tier A를 MLP에만 먹이므로, tier A를 완전히
+    제거한 pitchmix-only 후보(EXPERIMENTS.md §43)로 바꿔도 `cat_features`
+    (base_features + PITCHMIX_COLS, tier A 컬럼은 애초에 안 들어감)는 완전히 동일하다
+    — 즉 이 CatBoost 튜닝 결과는 tier A 유무와 무관하게 그대로 유효해서 재실행할
+    필요가 없다."""
+    train_split, val_split, features, cat_features, _mlp_num_cols = build_split(2024, cutoff7=True)
 
-    train_mask = train_df["season"] < 2024
-    val_mask = train_df["season"] == 2024
-
-    league_success_mean = train_df.loc[train_mask, TARGET_COL].mean()
-    train_df = add_engineered_features(train_df, league_success_mean)
-
-    drop_cols = ["row_id", TARGET_COL]
-    features = [col for col in train_df.columns if col not in drop_cols]
-
-    for col in CAT_FEATURES:
-        train_df[col] = train_df[col].astype(str).fillna("missing")
-
-    train_split = train_df.loc[train_mask, features + [TARGET_COL]].reset_index(drop=True)
-    val_split = train_df.loc[val_mask, features + [TARGET_COL]].reset_index(drop=True)
-    train_split = apply_f1_filter(train_split)
-
-    X_train = train_split[features]
+    X_train = train_split[cat_features]
     y_train = train_split[TARGET_COL].values
-    X_val = val_split[features]
+    X_val = val_split[cat_features]
     y_val = val_split[TARGET_COL].values
 
     train_pool = Pool(data=X_train, label=y_train, cat_features=CAT_FEATURES)

@@ -94,10 +94,11 @@ def main():
     with open(ref_model_path, 'rb') as f:
         best_bundle = pickle.load(f)
 
-    from code.train import apply_f1_filter, add_engineered_features
+    from code.train import apply_f1_filter, add_engineered_features, TRACKMAN_TIER_FEED, build_season_end_lookup
     from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, QUANTILE_N_BINS, embed_dim_for_cardinality, fit_preprocessing, fit_quantile_edges, to_tensors, train_mlp, make_bundle, get_device
     from code.catboost_model import train_catboost, DEFAULT_FULL_RETRAIN_ITERATIONS
     from code.blend_model import make_blend_bundle
+    from code.trackman_pitcher_features import clean_trackman, add_all_tiers, merge_coarse_pitchmix, PITCHMIX_COLS
 
     # reference 번들이 현재 스태킹 포맷("catboost_model"+"mlp_bundle"+"meta_model")이면 MLP
     # 멤버별 best_epoch, CatBoost best_iteration, 메타모델 가중치를 그대로 재사용하고,
@@ -125,13 +126,50 @@ def main():
 
     train_df = train_df_raw.dropna(subset=[TARGET_COL]).reset_index(drop=True)
 
+    # 트랙맨 tier A 피처 병합. holdout=2025로 넘겨 모든 학습 행(season<=2024)이 자기
+    # 시즌까지의 트랙맨을 그대로 보게 한다(cutoff=min(season,2024)=season) — 실제 서빙
+    # (test season=2025, 트랙맨엔 아예 없는 시즌)과 가장 가까운 분포. train.py/test.py의
+    # 검증 단계(holdout=2024, season==2024는 own-season 클램프)와는 의도적으로 다르다.
+    pitcher_map = pd.read_csv("./open/temp/pitcher_map.csv")
+    df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"), encoding="utf-8-sig")
+    df_trm_clean = clean_trackman(df_trm)
+    train_df, trk_tier_cols = add_all_tiers(train_df, df_trm_clean, pitcher_map, list(TRACKMAN_TIER_FEED), holdout=2025)
+    trk_mlp_cols = [c for tier, cols in trk_tier_cols.items() if TRACKMAN_TIER_FEED[tier] == "mlp" for c in cols]
+    trk_cat_cols = [c for tier, cols in trk_tier_cols.items() if TRACKMAN_TIER_FEED[tier] == "cat" for c in cols]
+
+    # coarse pitchmix(->CatBoost) 병합. 실전 서빙(test season=2025)은 트랙맨에 전혀 없는
+    # 시즌이므로 holdout=None(전체 2019~2024 트랙맨을 그대로 테이블화)이 실전과 가장
+    # 가까운 분포 — build_lookup_full_history와 동일한 논리. 이 테이블을 submit/model/에
+    # 정적 CSV로 동봉해 submit/script.py가 재계산 없이 그대로 쓰게 한다(pitcher_map.csv와
+    # 동일한 관례).
+    train_df = merge_coarse_pitchmix(train_df, df_trm, holdout=None)
+    trk_cat_cols = trk_cat_cols + PITCHMIX_COLS
+    print(f"[Full Retrain][트랙맨] tier별 피처 수: { {t: len(c) for t, c in trk_tier_cols.items()} }, pitchmix 피처 {len(PITCHMIX_COLS)}개")
+
+    from code.trackman_pitcher_features import compute_coarse_pitchmix, COARSE_COLS
+    pitchmix_lookup, _ = compute_coarse_pitchmix(df_trm)
+    pitchmix_lookup_path = "./submit/model/pitchmix_lookup.csv"
+    os.makedirs(os.path.dirname(pitchmix_lookup_path), exist_ok=True)
+    pitchmix_lookup.to_csv(pitchmix_lookup_path, index=False)
+    print(f"[Full Retrain] pitchmix lookup 테이블 저장 완료 -> {pitchmix_lookup_path} ({len(pitchmix_lookup)}개 조합)")
+
+    # 투수/타자 시즌 진행분 lookup (팀원 제보 피처, 2026-08-18 세션 채택) 정적 테이블
+    # 저장. pitchmix_lookup.csv와 동일한 관례 — test.csv(season=2025)는 과거 시즌 행이
+    # 없으므로 이 테이블(전체 2019~2024 기준, season 2025로 키 이동됨)을 재계산 없이
+    # 병합만 한다(code/train.py::build_season_end_lookup 참고).
+    season_end_lookup = build_season_end_lookup(train_df)
+    season_end_lookup_path = "./submit/model/season_end_lookup.csv"
+    season_end_lookup.to_csv(season_end_lookup_path, index=False)
+    print(f"[Full Retrain] 시즌 진행분 lookup 테이블 저장 완료 -> {season_end_lookup_path} ({len(season_end_lookup)}행)")
+
     league_success_mean = train_df[TARGET_COL].mean()
     train_df = add_engineered_features(train_df, league_success_mean)
     train_df = apply_f1_filter(train_df)
 
     drop_cols = [ID_COL, TARGET_COL]
     full_features = [col for col in train_df.columns if col not in drop_cols]
-    num_cols = [c for c in full_features if c not in CAT_COLS]
+    num_cols = [c for c in full_features if c not in CAT_COLS and c not in trk_cat_cols]
+    cat_feature_cols = [c for c in full_features if c not in trk_mlp_cols]
 
     print(f"[Full Retrain] 총 {len(train_df)}행 전체 데이터에 대해 {len(ENSEMBLE_SEEDS)}개 시드 앙상블을 재학습합니다. (시드별 epoch: {[e + FULL_RETRAIN_EPOCH_BUFFER for e in per_seed_epochs]})")
 
@@ -163,10 +201,10 @@ def main():
 
     catboost_full_iterations = ref_catboost_best_iteration + CATBOOST_ITERATION_BUFFER
     print(f"[Full Retrain] CatBoost {catboost_full_iterations} iteration 재학습 (reference best_iteration={ref_catboost_best_iteration} + buffer {CATBOOST_ITERATION_BUFFER})")
-    X_full_raw, y_full_raw = train_df[full_features], train_df[TARGET_COL].values
+    X_full_raw, y_full_raw = train_df[cat_feature_cols], train_df[TARGET_COL].values
     final_catboost_model, _ = train_catboost(X_full_raw, y_full_raw, iterations=catboost_full_iterations, verbose=True)
 
-    final_bundle = make_blend_bundle(final_catboost_model, final_mlp_bundle, blend_meta_model)
+    final_bundle = make_blend_bundle(final_catboost_model, final_mlp_bundle, blend_meta_model, cat_feature_cols=cat_feature_cols)
     final_bundle["catboost_best_iteration"] = catboost_full_iterations
     print(f"[Full Retrain] 최종 블렌드 번들 구성 완료 (meta_model={blend_meta_model})")
 
