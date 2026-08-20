@@ -94,7 +94,7 @@ def main():
     with open(ref_model_path, 'rb') as f:
         best_bundle = pickle.load(f)
 
-    from code.train import apply_f1_filter, add_engineered_features, TRACKMAN_TIER_FEED, build_season_end_lookup
+    from code.train import apply_f1_filter, add_engineered_features, apply_te_residual_features, TE_RESIDUAL_COLS, TRACKMAN_TIER_FEED, build_season_end_lookup
     from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, QUANTILE_N_BINS, embed_dim_for_cardinality, fit_preprocessing, fit_quantile_edges, to_tensors, train_mlp, make_bundle, get_device
     from code.catboost_model import train_catboost, DEFAULT_FULL_RETRAIN_ITERATIONS
     from code.blend_model import make_blend_bundle
@@ -166,10 +166,18 @@ def main():
     train_df = add_engineered_features(train_df, league_success_mean)
     train_df = apply_f1_filter(train_df)
 
+    # target-encoding 잔차 6개(팀원 제보 Track A, ->CatBoost 전용, 2026-08-19 채택).
+    # 제출 모델(submit/script.py)은 test.csv(항상 학습 최대 시즌보다 뒤인 season=2025)를
+    # 추론할 때도 이 causal 함수를 그대로 재사용한다 — 정적 lookup CSV가 따로 필요
+    # 없다(train.csv가 평가 서버 data/ 에도 동봉되므로, league_success_mean과 동일하게
+    # 매 실행 재계산). code/train.py::apply_te_residual_features 문서 참고.
+    te_prior = train_df[TARGET_COL].mean()
+    train_df = apply_te_residual_features(train_df, train_df, te_prior)
+
     drop_cols = [ID_COL, TARGET_COL]
-    full_features = [col for col in train_df.columns if col not in drop_cols]
+    full_features = [col for col in train_df.columns if col not in drop_cols and col not in TE_RESIDUAL_COLS]
     num_cols = [c for c in full_features if c not in CAT_COLS and c not in trk_cat_cols]
-    cat_feature_cols = [c for c in full_features if c not in trk_mlp_cols]
+    cat_feature_cols = [c for c in full_features if c not in trk_mlp_cols] + TE_RESIDUAL_COLS
 
     print(f"[Full Retrain] 총 {len(train_df)}행 전체 데이터에 대해 {len(ENSEMBLE_SEEDS)}개 시드 앙상블을 재학습합니다. (시드별 epoch: {[e + FULL_RETRAIN_EPOCH_BUFFER for e in per_seed_epochs]})")
 

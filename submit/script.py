@@ -250,6 +250,70 @@ def add_engineered_features(df, league_success_mean):
     return df
 
 
+def apply_f1_filter(df):
+    """code/train.py::apply_f1_filter 와 동일 (수동 동기화 유지). 2022년 이하 시즌의
+    game_type=='F' 행을 target-encoding 인코딩 소스에서 제거한다 — 그러지 않으면
+    F1 오염이 인코딩 통계로 재유입된다(팀원이 처음 겪은 버그와 동일 함정)."""
+    return df[~((df['game_type'] == 'F') & (df['season'] <= 2022))].reset_index(drop=True)
+
+
+# target-encoding 잔차 6개(팀원 제보 Track A, ->CatBoost 전용, code/train.py::
+# apply_te_residual_features 와 동일, 수동 동기화 유지). test.csv(season=2025)는
+# 항상 학습 데이터의 모든 시즌보다 뒤이므로, 시즌-causal 인코딩(merge_asof
+# backward, allow_exact_matches=False)이 자연스럽게 "학습 데이터 전체 누적"을
+# 반환한다 — 정적 lookup CSV가 따로 필요 없고, train.csv(평가 서버 data/ 에도
+# 동봉됨, league_success_mean과 동일한 근거)로 매 실행 재계산한다.
+TE_K_SMOOTH = 200
+TE_AXES = [
+    ("te_p_cnt", ["pitcher_id", "balls_before", "strikes_before"], "p_main"),
+    ("te_p_bhand", ["pitcher_id", "batter_hand"], "p_main"),
+    ("te_p_run", ["pitcher_id", "num_runners_on"], "p_main"),
+    ("te_p_inn", ["pitcher_id", "inning"], "p_main"),
+    ("te_b_cnt", ["batter_id", "balls_before", "strikes_before"], "b_main"),
+]
+TE_MAIN_AXES = [("p_main", ["pitcher_id"]), ("b_main", ["batter_id"])]
+TE_RESIDUAL_COLS = [f"{name}_res" for name, *_ in TE_AXES] + ["te_covered"]
+
+
+def causal_smoothed_te_encode(source_df, query_df, group_cols, prior, k=TE_K_SMOOTH):
+    agg = source_df.groupby(group_cols + ["season"])[TARGET_COL].agg(["sum", "count"]).reset_index()
+    agg = agg.sort_values("season")
+    agg["cum_sum"] = agg.groupby(group_cols)["sum"].cumsum()
+    agg["cum_n"] = agg.groupby(group_cols)["count"].cumsum()
+    agg = agg[group_cols + ["season", "cum_sum", "cum_n"]].sort_values("season")
+
+    query = query_df[group_cols + ["season"]].reset_index()
+    query_sorted = query.sort_values("season")
+    merged = pd.merge_asof(
+        query_sorted, agg, on="season", by=group_cols,
+        direction="backward", allow_exact_matches=False,
+    )
+    merged = merged.sort_values("index")
+    cum_sum = merged["cum_sum"].fillna(0.0).values
+    cum_n = merged["cum_n"].fillna(0.0).values
+    enc = (cum_sum + prior * k) / (cum_n + k)
+    covered = (cum_n > 0).astype(np.int64)
+    return enc, covered
+
+
+def apply_te_residual_features(source_df, query_df, prior):
+    query_df = query_df.copy()
+    mains = {}
+    covered_any = np.zeros(len(query_df), dtype=np.int64)
+    for name, group_cols in TE_MAIN_AXES:
+        enc, covered = causal_smoothed_te_encode(source_df, query_df, group_cols, prior)
+        mains[name] = enc
+        covered_any = np.maximum(covered_any, covered)
+
+    for name, group_cols, main_key in TE_AXES:
+        enc, covered = causal_smoothed_te_encode(source_df, query_df, group_cols, prior)
+        query_df[f"{name}_res"] = enc - mains[main_key]
+        covered_any = np.maximum(covered_any, covered)
+
+    query_df["te_covered"] = covered_any
+    return query_df
+
+
 def apply_preprocessing(df, cat_cols, num_cols, cat_encoder, num_imputer, num_scaler):
     """code/mlp_model.py::apply_preprocessing 와 동일 로직 (수동 동기화 유지)"""
     df = df.copy()
@@ -302,10 +366,18 @@ def main():
     # 3. asof_* 및 카운트 정보를 조합한 파생 피처 추가 (code/train.py와 동일 정의)
     tr_final = add_engineered_features(df_test, league_success_mean)
 
+    # 3b. target-encoding 잔차 6개(->CatBoost 전용). 인코딩 소스는 F1 필터가 적용된
+    # train.csv 전체 — test.csv(season=2025)는 항상 그보다 뒤라 causal_smoothed_te_encode가
+    # 자연히 "학습 데이터 전체 누적"을 반환한다(정적 lookup 불필요, apply_te_residual_features
+    # 문서 참고). features 목록에는 안 넣어 MLP는 이 6개를 못 보게 유지한다.
+    te_train_source = apply_f1_filter(df_train_raw)
+    te_prior = te_train_source[TARGET_COL].mean()
+    tr_final = apply_te_residual_features(te_train_source, tr_final, te_prior)
+
     # 4. 모델 입력 데이터 정렬
     drop_cols = [ID_COL, TARGET_COL]
-    features = [col for col in tr_final.columns if col not in drop_cols]
-    X_test = tr_final[features]
+    features = [col for col in tr_final.columns if col not in drop_cols and col not in TE_RESIDUAL_COLS]
+    X_test = tr_final[features + TE_RESIDUAL_COLS]
 
     # 5. CatBoost + Tabular MLP 앙상블 블렌드 확률 추론 수행
     # 5a. CatBoost (원본 dtype 그대로 입력 — game_type/base_state는 문자열로 자체 처리)

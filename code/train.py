@@ -107,6 +107,72 @@ def apply_season_progression_features(df, lookup):
     return df
 
 
+TE_K_SMOOTH = 200
+
+# (피처명, 그룹 컬럼, 잔차를 뺄 주효과 컬럼명)
+TE_AXES = [
+    ("te_p_cnt", ["pitcher_id", "balls_before", "strikes_before"], "p_main"),
+    ("te_p_bhand", ["pitcher_id", "batter_hand"], "p_main"),
+    ("te_p_run", ["pitcher_id", "num_runners_on"], "p_main"),
+    ("te_p_inn", ["pitcher_id", "inning"], "p_main"),
+    ("te_b_cnt", ["batter_id", "balls_before", "strikes_before"], "b_main"),
+]
+TE_MAIN_AXES = [("p_main", ["pitcher_id"]), ("b_main", ["batter_id"])]
+TE_RESIDUAL_COLS = [f"{name}_res" for name, *_ in TE_AXES] + ["te_covered"]
+
+
+def causal_smoothed_te_encode(source_df, query_df, group_cols, prior, k=TE_K_SMOOTH):
+    """source_df(F1 필터 적용된 학습 파티션)로 시즌-causal 스무딩 타겟인코딩을 만들어
+    query_df(train_split 자신 또는 val_split)에 적용한다. query_df 행 자신의 시즌보다
+    엄격히 앞선 시즌들의 데이터만 쓴다(`allow_exact_matches=False`가 핵심) — 그래서
+    학습 파티션 자기 자신에 적용해도 self-leakage가 없고, F1 필터가 이미 적용된
+    source_df만 쓰므로 §16 스타일의 F1 오염 재유입도 구조적으로 막힌다."""
+    agg = source_df.groupby(group_cols + ["season"])["control_success"].agg(["sum", "count"]).reset_index()
+    agg = agg.sort_values("season")
+    agg["cum_sum"] = agg.groupby(group_cols)["sum"].cumsum()
+    agg["cum_n"] = agg.groupby(group_cols)["count"].cumsum()
+    agg = agg[group_cols + ["season", "cum_sum", "cum_n"]].sort_values("season")
+
+    query = query_df[group_cols + ["season"]].reset_index()
+    query_sorted = query.sort_values("season")
+    merged = pd.merge_asof(
+        query_sorted, agg, on="season", by=group_cols,
+        direction="backward", allow_exact_matches=False,
+    )
+    merged = merged.sort_values("index")
+    cum_sum = merged["cum_sum"].fillna(0.0).values
+    cum_n = merged["cum_n"].fillna(0.0).values
+    enc = (cum_sum + prior * k) / (cum_n + k)
+    covered = (cum_n > 0).astype(np.int64)
+    return enc, covered
+
+
+def apply_te_residual_features(source_df, query_df, prior):
+    """투수/타자 상황별 target-encoding 잔차 6개(팀원 제보 Track A, 2026-08-19 채택)를
+    계산한다. asof_pitcher_success_rate(주효과, 이미 공식 피처)와의 중복을 줄이려고
+    상황별 인코딩에서 주효과(p_main/b_main)를 뺀 잔차만 쓴다. CatBoost에만 먹인다 —
+    MLP에 같이 먹이면 cutoff7에서 MLP 단독이 크게 무너져(-24.51) 블렌드 이득이
+    거의 사라졌지만(-2.38), CatBoost 전용으로 두면 cutoff7 +6.97 / season==2023
+    +20.49로 양쪽 다 플러스였고, rolling-origin 3-fold(2021/2022/2023, R-only,
+    §35 방식으로 F1 트랩 회피) 재검증에서도 3/3 fold 승리·평균 +28.01로 확인됨
+    (code/experiment_target_encoding_residual*.py, EXPERIMENTS.md 참고)."""
+    query_df = query_df.copy()
+    mains = {}
+    covered_any = np.zeros(len(query_df), dtype=np.int64)
+    for name, group_cols in TE_MAIN_AXES:
+        enc, covered = causal_smoothed_te_encode(source_df, query_df, group_cols, prior)
+        mains[name] = enc
+        covered_any = np.maximum(covered_any, covered)
+
+    for name, group_cols, main_key in TE_AXES:
+        enc, covered = causal_smoothed_te_encode(source_df, query_df, group_cols, prior)
+        query_df[f"{name}_res"] = enc - mains[main_key]
+        covered_any = np.maximum(covered_any, covered)
+
+    query_df["te_covered"] = covered_any
+    return query_df
+
+
 def add_engineered_features(df, league_success_mean):
     """asof_* 및 카운트 정보를 조합한 파생 피처를 추가합니다.
 
@@ -191,6 +257,14 @@ def main():
     val_split = train_df.loc[val_mask, features + [target_col]].reset_index(drop=True)
     train_split = apply_f1_filter(train_split)
     print(f"훈련 데이터 (2019~2023 + 2024 3~6월, F1 필터 적용): {len(train_split)} 행 | 검증 데이터 (2024 7~10월): {len(val_split)} 행")
+
+    # target-encoding 잔차 6개(팀원 제보 Track A, ->CatBoost 전용) — 인코딩 소스는
+    # F1 필터가 이미 적용된 train_split 자신(apply_te_residual_features 문서 참고).
+    te_prior = train_split[target_col].mean()
+    te_source = train_split
+    train_split = apply_te_residual_features(te_source, train_split, te_prior)
+    val_split = apply_te_residual_features(te_source, val_split, te_prior)
+    cat_feature_cols = cat_feature_cols + TE_RESIDUAL_COLS
 
     train_proc, cat_encoder, num_imputer, num_scaler, cat_dims = fit_preprocessing(train_split, CAT_COLS, num_cols)
     val_proc = apply_preprocessing(val_split, CAT_COLS, num_cols, cat_encoder, num_imputer, num_scaler)

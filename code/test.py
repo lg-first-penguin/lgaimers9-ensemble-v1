@@ -17,7 +17,7 @@ ID_COL = "row_id"
 TARGET_COL = "control_success"
 
 # 이제 상위 루트 디렉토리가 시스템 패스에 잡혀있으므로 완벽하게 import 성공합니다.
-from code.train import add_engineered_features, TRACKMAN_TIER_FEED
+from code.train import add_engineered_features, apply_f1_filter, apply_te_residual_features, TE_RESIDUAL_COLS, TRACKMAN_TIER_FEED
 from code.mlp_model import compute_bss
 from code.blend_model import predict_blend_bundle
 from code.trackman_pitcher_features import clean_trackman, add_all_tiers, merge_coarse_pitchmix
@@ -41,6 +41,7 @@ def main():
     # train.py와 동일한 분할(EXPERIMENTS.md §35 ABS 레짐 시프트, cutoff=7 채택)을 그대로 재현한다.
     # 학습 = season<2024 + (season==2024 & game_month<7), 검증 = season==2024 & game_month>=7
     train_mask = (train_df['season'] < 2024) | ((train_df['season'] == 2024) & (train_df['game_month'] < 7))
+    val_mask = (train_df['season'] == 2024) & (train_df['game_month'] >= 7)
 
     # train.py와 동일하게 트랙맨 tier A + coarse pitchmix 피처를 병합 (holdout=2024,
     # season==2024는 own-season 트랙맨 클램프) — 검증 스플릿을 정확히 재현하려면 이
@@ -57,9 +58,18 @@ def main():
     features = [col for col in train_df.columns if col not in [ID_COL, TARGET_COL]]
 
     # 2024년 7~10월만 학습에서 제외하고 검증셋으로 사용 (3~6월은 학습에 포함됨 — train.py와 동일)
-    val_split = train_df[(train_df['season'] == 2024) & (train_df['game_month'] >= 7)].reset_index(drop=True)
+    train_split = train_df.loc[train_mask, features + [TARGET_COL]].reset_index(drop=True)
+    val_split = train_df.loc[val_mask, features + [TARGET_COL]].reset_index(drop=True)
+    train_split = apply_f1_filter(train_split)
 
-    X_val, y_val = val_split[features], val_split[TARGET_COL].values
+    # target-encoding 잔차 6개(->CatBoost 전용) — train.py와 동일하게 F1 필터된
+    # train_split을 인코딩 소스로 val_split에 적용한다. reference 번들이 이 피처
+    # 도입 이전 구버전이면 predict_blend_bundle이 cat_feature_cols 불일치로 예외를
+    # 던지고, 위의 legacy 분기가 그 경우를 "비교 불가 -> 신규 모델 채택"으로 처리한다.
+    te_prior = train_split[TARGET_COL].mean()
+    val_split = apply_te_residual_features(train_split, val_split, te_prior)
+
+    X_val, y_val = val_split[features + TE_RESIDUAL_COLS], val_split[TARGET_COL].values
 
     # 1. 신규 최신 임시 버퍼 모델 검증
     with open(TEMP_MODEL_PATH, 'rb') as f:
