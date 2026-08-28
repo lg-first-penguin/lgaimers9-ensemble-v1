@@ -42,7 +42,7 @@ from code.catboost_model import predict_catboost_ensemble, train_catboost_ensemb
 from code.train import (
     process_trackman_features_safe, add_engineered_features, apply_f1_filter,
     apply_same_hand, apply_te_residual_features, SAME_HAND_COLS, TE_RESIDUAL_COLS,
-    YUDAM_ENSEMBLE_SEEDS, YUDAM_CATBOOST_SEEDS,
+    YUDAM_ENSEMBLE_SEEDS, YUDAM_CATBOOST_SEEDS, is_trackman64,
 )
 from code.trackman_pitcher_features import merge_coarse_pitchmix
 
@@ -72,7 +72,7 @@ def _yudam_catboost_params():
 
 
 def build_split(regime="cutoff7", add_features_fn=None, drop_cols=None, apply_f1=True, verbose=True,
-                cutoff_month=None, fixed_val_month=None, f1_boundary=2022):
+                cutoff_month=None, fixed_val_month=None, f1_boundary=2022, keep_trackman64=False):
     """현재 code/train.py::main()의 전처리를 그대로 재현해 (train_split, val_split,
     num_cols, cat_feature_cols, all_cols)를 돌려준다.
 
@@ -85,6 +85,12 @@ def build_split(regime="cutoff7", add_features_fn=None, drop_cols=None, apply_f1
                         (=프로덕션). 스윕에서 cutoff_month 를 바꿔도 val 셋을 고정해 점수를
                         비교가능하게 하려면 여기에 고정값(예: 8)을 준다.
       f1_boundary     : F1 필터 상한 시즌 (기본 2022). None 이면 F1 필터 완전 비활성.
+
+    keep_trackman64 : 기본 False = 트랙맨64 상황조인 물리량 컬럼을 CatBoost/MLP 피처목록
+                      양쪽에서 제외 (실전 1117.03 레시피 = 현행 프로덕션. code/train.py 와 동일).
+                      컬럼 자체는 all_cols/train_split/val_split 에 남는다. True 로 주면
+                      옛 candidate B raw(143피처) 동작 — collapse-sim 등 트랙맨64 를 살려서
+                      비교해야 하는 스크립트 전용.
     """
     if regime not in REGIMES:
         raise ValueError(f"regime must be one of {list(REGIMES)}")
@@ -142,10 +148,18 @@ def build_split(regime="cutoff7", add_features_fn=None, drop_cols=None, apply_f1
     base_drop = {"row_id", TARGET} | dropped
     all_cols = [c for c in train_df.columns if c not in base_drop]
 
-    # code/train.py 와 동일한 라우팅: same_hand -> MLP만, TE-residual -> CatBoost만.
-    cat_feature_cols = [c for c in all_cols if c not in SAME_HAND_COLS and c not in exclude_from_cat]
+    # code/train.py 와 동일한 라우팅: same_hand -> MLP만, TE-residual -> CatBoost만,
+    # 트랙맨64(상황조인 물리량) -> 양쪽 모두 제외 (실전 1117.03 레시피, 2025 추론때
+    # season 매칭 0건으로 상수붕괴 → CatBoost miscalibrate). 컬럼 자체는 all_cols 에
+    # 남겨 df/train_split/val_split 에는 존재 (collapse-sim 등이 keep_trackman64=True 로
+    # 되살려 쓸 수 있게).
+    _tm64_excl = (lambda c: False) if keep_trackman64 else is_trackman64
+    cat_feature_cols = [c for c in all_cols
+                        if c not in SAME_HAND_COLS and c not in exclude_from_cat
+                        and not _tm64_excl(c)]
     num_cols = [c for c in all_cols
-                if c not in CAT_COLS and c not in TE_RESIDUAL_COLS and c not in exclude_from_mlp]
+                if c not in CAT_COLS and c not in TE_RESIDUAL_COLS and c not in exclude_from_mlp
+                and not _tm64_excl(c)]
 
     train_split = train_df.loc[train_mask, all_cols + [TARGET]].reset_index(drop=True)
     val_split = train_df.loc[val_mask, all_cols + [TARGET]].reset_index(drop=True)
@@ -173,9 +187,11 @@ def build_split(regime="cutoff7", add_features_fn=None, drop_cols=None, apply_f1
     cat_feature_cols = cat_feature_cols + TE_RESIDUAL_COLS
 
     if verbose:
+        _tm64_n = sum(1 for c in all_cols if is_trackman64(c))
+        _tm64_note = (f" | 트랙맨64 {_tm64_n}개 " + ("포함(keep_trackman64=True)" if keep_trackman64 else "제외")) if _tm64_n else ""
         print(f"[build_split:{regime}] train={len(train_split)} val={len(val_split)} | "
               f"CatBoost {len(cat_feature_cols)}피처 / MLP {len(num_cols) + len(CAT_COLS)}피처 "
-              f"(num {len(num_cols)} + cat {len(CAT_COLS)})", flush=True)
+              f"(num {len(num_cols)} + cat {len(CAT_COLS)}){_tm64_note}", flush=True)
         if dropped:
             print(f"[build_split] dropped: {sorted(dropped)}", flush=True)
         if exclude_from_cat or exclude_from_mlp:
