@@ -20,7 +20,7 @@ Tabular MLP 7-seed 앙상블 단독 789.58, 단순 가중 평균 블렌드(alpha
 import numpy as np
 
 from code.mlp_model import predict_bundle, compute_bss
-from code.catboost_model import predict_catboost
+from code.catboost_model import predict_catboost, predict_catboost_ensemble
 
 
 def predict_meta(w_cat, w_mlp, intercept, cat_preds, mlp_preds):
@@ -48,9 +48,18 @@ def make_blend_bundle(catboost_model, mlp_bundle, meta_model, cat_feature_cols=N
     """cat_feature_cols: CatBoost가 실제로 학습에 사용한 컬럼 목록. 트랙맨처럼 CatBoost와
     MLP에 서로 다른 피처 서브셋을 먹이는 경우, 추론 시 df에 두 모델 몫 컬럼이 전부 섞여
     있어도 CatBoost에는 이 목록으로 서브셋해서 넘겨야 학습 시 피처 스키마와 일치한다.
-    None이면(트랙맨 미사용 등 기존 방식) df를 그대로 CatBoost에 넘긴다."""
+    None이면(트랙맨 미사용 등 기존 방식) df를 그대로 CatBoost에 넘긴다.
+
+    catboost_model: 단일 CatBoostClassifier 또는(2026-08-24, 5-seed 배깅 도입)
+    CatBoostClassifier 리스트를 받는다. 리스트면 "catboost_models"(신규, 전체 리스트)
+    와 "catboost_model"(구버전 호환/포맷감지용, 리스트의 첫 모델)을 둘 다 저장한다 —
+    `dopip.py`의 `"catboost_model" in best_bundle` 포맷 감지, 기존 실험 스크립트들의
+    단일모델 접근 모두 그대로 동작한다."""
+    is_list = isinstance(catboost_model, (list, tuple))
+    catboost_models = list(catboost_model) if is_list else [catboost_model]
     return {
-        "catboost_model": catboost_model,
+        "catboost_model": catboost_models[0],
+        "catboost_models": catboost_models,
         "mlp_bundle": mlp_bundle,
         "meta_model": dict(meta_model),
         "cat_feature_cols": list(cat_feature_cols) if cat_feature_cols is not None else None,
@@ -60,7 +69,10 @@ def make_blend_bundle(catboost_model, mlp_bundle, meta_model, cat_feature_cols=N
 def predict_blend_bundle(bundle, df, device=None):
     cat_feature_cols = bundle.get("cat_feature_cols")
     cat_df = df[cat_feature_cols] if cat_feature_cols is not None else df
-    cat_preds = predict_catboost(bundle["catboost_model"], cat_df)
+    if "catboost_models" in bundle:
+        cat_preds = predict_catboost_ensemble(bundle["catboost_models"], cat_df)
+    else:
+        cat_preds = predict_catboost(bundle["catboost_model"], cat_df)
     mlp_preds = predict_bundle(bundle["mlp_bundle"], df, device=device)
     meta = bundle["meta_model"]
     return predict_meta(meta["w_cat"], meta["w_mlp"], meta["intercept"], cat_preds, mlp_preds)

@@ -1,0 +1,2 @@
+TS=20260828_115249
+candidate B (yudam recipe port) submit/ backup, taken before B-with-PLE build 2026-08-28

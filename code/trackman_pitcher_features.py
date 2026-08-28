@@ -44,10 +44,38 @@ TIER_SPECS = {
 }
 
 
+def _drop_generation_bug_fragments(df):
+    """게임 ID 생성버그로 생긴 파편 게임(팀원 EDA 항목 8, 2026-08-22 세션에서 재확인:
+    예 `20190528-NCDinosMajors-2`~`-33` 32개, 전부 1투구짜리이고 진짜 경기인
+    `20190528-NCDinosMajors-1`(328투구)의 특정 투구 하나씩과 완전히 겹친다)을 제거한다.
+    소규모(<=10행) `trackman_game_id`의 행이 `(game_date, pitch_no, pitcher_trackman_id,
+    batter_trackman_id)` 기준으로 다른(더 큰) game_id에도 이미 존재하면 파편으로 간주해
+    제거하고 원본(더 큰 game_id) 쪽만 남긴다. `match_games_by_pitch_count`(투구수 유일
+    매칭)는 이 파편들이 전부 n_pitch=1이라 애초에 진짜 경기와 매칭될 수 없어 구조적으로
+    안전하지만(2026-08-22 세션 확인), 파편 행 자체는 pitchmix/물리지표 집계에 여전히
+    섞여 들어가므로 여기서 제거한다."""
+    game_sizes = df.groupby("trackman_game_id").size()
+    small_ids = game_sizes[game_sizes <= 10].index
+    if len(small_ids) == 0:
+        return df
+    key_cols = ["game_date", "pitch_no", "pitcher_trackman_id", "batter_trackman_id"]
+    is_small = df["trackman_game_id"].isin(small_ids)
+    big_keys = set(map(tuple, df.loc[~is_small, key_cols].dropna().to_numpy().tolist()))
+    small = df.loc[is_small]
+    is_fragment = small[key_cols].apply(tuple, axis=1).isin(big_keys)
+    fragment_ids = set(small.loc[is_fragment, "trackman_id"])
+    if fragment_ids:
+        before = len(df)
+        df = df[~df["trackman_id"].isin(fragment_ids)]
+        print(f"  game_id 생성버그 파편 제거: {before} -> {len(df)}행 ({before - len(df)}행 제거)")
+    return df
+
+
 def clean_trackman(df):
     """수동 검토(사람이 판정한 이상치) 결과를 반영한 클렌징: inning<1, balls/strikes/outs_before
-    범위 밖, extension<=0, zone_speed>rel_speed, trackman_id 제외 완전 중복 행을 제거하고,
-    손(pitcher_hand)이 여러 값으로 기록된 투수는 다수 기록된 손만 남긴다.
+    범위 밖 행을 제거하고, extension<=0/zone_speed>rel_speed는 해당 컬럼만 NaN 처리하며(행은
+    유지), game_id 생성버그 파편 행과 trackman_id 제외 완전 중복 행을 제거하고, 손(pitcher_hand)이
+    여러 값으로 기록된 투수는 다수 기록된 손만 남긴다.
 
     extension/zone_speed/rel_speed는 결측(NaN)인 행이 각각 7,716/7,921/7,617행 있는데,
     `x > 0`/`x <= y` 형태의 조건은 NaN 피연산자에서 항상 False가 되어 결측 행까지 "이상치"로
@@ -55,17 +83,30 @@ def clean_trackman(df):
     extension<=0 3행, zone_speed>rel_speed 1행뿐인데 8,119행이 지워지고 있었음). 결측은
     이상치가 아니므로 `.isna()`로 통과시킨다 — groupby(...).agg(["mean","std"])는 어차피
     컬럼별로 NaN을 자동으로 건너뛰므로(skipna=True 기본값), 한 컬럼이 결측이라고 그 행의
-    다른 멀쩡한 지표(rel_speed, spin_rate 등)까지 버릴 이유가 없다."""
+    다른 멀쩡한 지표(rel_speed, spin_rate 등)까지 버릴 이유가 없다.
+
+    2026-08-22 세션 갱신: 팀원 EDA와 대조해, extension<=0(3행)/zone_speed>rel_speed(1행)도
+    같은 논리로 "행 전체 제거"가 아니라 "해당 컬럼만 NaN"으로 바꿨다(다른 물리량은 정상일
+    수 있으므로) — 기존엔 이 4행만 행째로 지우고 있었다. game_id 생성버그 파편(32행,
+    `_drop_generation_bug_fragments`)도 추가했다. pitch_no 이슈(한화 시작번호 오프셋,
+    연속이라 정렬 순서엔 영향 없음/중복 pitch_no 2건)는 기존 완전-중복 제거로 이미
+    커버되는 것을 확인해 별도 처리를 추가하지 않았다."""
     before = len(df)
-    mask = (
+    row_mask = (
         (df["inning"] >= 1)
         & df["balls_before"].between(0, 3)
         & df["strikes_before"].between(0, 2)
         & df["outs_before"].between(0, 2)
-        & (df["extension"].isna() | (df["extension"] > 0))
-        & (df["zone_speed"].isna() | df["rel_speed"].isna() | (df["zone_speed"] <= df["rel_speed"]))
     )
-    df = df[mask].copy()
+    df = df[row_mask].copy()
+
+    ext_bad = df["extension"].notna() & (df["extension"] <= 0)
+    df.loc[ext_bad, "extension"] = np.nan
+    speed_bad = df["zone_speed"].notna() & df["rel_speed"].notna() & (df["zone_speed"] > df["rel_speed"])
+    df.loc[speed_bad, ["zone_speed", "rel_speed"]] = np.nan
+
+    df = _drop_generation_bug_fragments(df)
+
     dup_cols = [c for c in df.columns if c != "trackman_id"]
     df = df.drop_duplicates(subset=dup_cols)
 
@@ -200,5 +241,45 @@ def merge_coarse_pitchmix(df_main, df_trm, holdout):
     lookup, fallback = compute_coarse_pitchmix(trm_cut)
     merged = pd.merge(df_main, lookup, on=COARSE_COLS, how="left")
     for c in PITCHMIX_COLS:
+        merged[c] = merged[c].fillna(fallback[c])
+    return merged
+
+
+# ---- coarse physical metrics (신규 후보, 2026-08-20 세션) ----
+# tier A(투수 identity 크로스워크 x 구종군별 물리 지표)는 실전 -31.41로 기각됐다
+# (PROJECT_HISTORY.md §41) — 원인으로 유력한 건 크로스워크 커버리지가 train.csv
+# 검증구간에서 낙관적으로 편향된 것(핵심 교훈 #21, 실제 test.csv 샘플 5개 중 4개가
+# pitcher_map.csv에 없었음). coarse pitchmix는 투수 identity 대신 (balls_before,
+# strikes_before, pitcher_hand, batter_hand) 축만 써서 이 커버리지 편향을 구조적으로
+# 피해갔고 실제로 채택됐다. 같은 non-identity 축을 물리 지표(rel_speed 등)에도 적용해본
+# 적은 아직 없다 — coarse_pitchmix가 "이 카운트/손 조합에서 어떤 구종을 던지는 경향"을
+# 담듯, coarse_phys는 "이 카운트/손 조합에서 던지는 공의 평균 물리 특성(구속/무브먼트 등)"을
+# 담는다(예: 2스트라이크 카운트는 변화구 비중이 높아 평균 구속이 낮아지는 식의 상황적 신호).
+COARSE_PHYS_COLS = [f"coarse_phys_{m}" for m in METRICS]
+
+
+def compute_coarse_physmetrics(df_trm_clean):
+    """(balls_before, strikes_before, pitcher_hand, batter_hand) 조합별 물리 지표 평균
+    8개를 계산해 wide 포맷으로 반환한다. df_trm_clean은 clean_trackman()을 거친 데이터여야
+    한다 — 비율(pitchmix)과 달리 실제 물리값 평균이라 이상치(결측 오필터링 버그가 고쳐진
+    버전) 처리가 필요하다."""
+    df_trm_clean = df_trm_clean.copy()
+    df_trm_clean["pitcher_hand"] = df_trm_clean["pitcher_hand"].map(_HAND_CODE)
+    df_trm_clean["batter_hand"] = df_trm_clean["batter_hand"].map(_HAND_CODE)
+
+    g = df_trm_clean.groupby(COARSE_COLS)[METRICS].mean().reset_index()
+    g = g.rename(columns={m: f"coarse_phys_{m}" for m in METRICS})
+
+    fallback = {f"coarse_phys_{m}": v for m, v in df_trm_clean[METRICS].mean().items()}
+    return g, fallback
+
+
+def merge_coarse_physmetrics(df_main, df_trm_clean, holdout):
+    """merge_coarse_pitchmix와 동일한 holdout/누출방지 컨벤션. df_trm_clean은 이미
+    clean_trackman()을 적용한 데이터를 넘겨야 한다(compute_coarse_physmetrics 문서 참고)."""
+    trm_cut = df_trm_clean if holdout is None else df_trm_clean[df_trm_clean["season"] < holdout]
+    lookup, fallback = compute_coarse_physmetrics(trm_cut)
+    merged = pd.merge(df_main, lookup, on=COARSE_COLS, how="left")
+    for c in COARSE_PHYS_COLS:
         merged[c] = merged[c].fillna(fallback[c])
     return merged

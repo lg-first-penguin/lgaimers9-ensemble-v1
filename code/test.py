@@ -2,7 +2,6 @@
 import sys
 import os
 
-# [조립 핵심 지점] 실행 디렉토리 위치 독립 무결성 보정식 주입
 current_file_path = os.path.abspath(__file__)
 current_dir = os.path.dirname(current_file_path)
 parent_dir = os.path.dirname(current_dir)
@@ -16,11 +15,19 @@ import pandas as pd
 ID_COL = "row_id"
 TARGET_COL = "control_success"
 
-# 이제 상위 루트 디렉토리가 시스템 패스에 잡혀있으므로 완벽하게 import 성공합니다.
-from code.train import add_engineered_features, apply_f1_filter, apply_te_residual_features, TE_RESIDUAL_COLS, TRACKMAN_TIER_FEED
+# 2026-08-27: code/train.py를 유담님 파이프라인 기반으로 전면 교체하면서 이 파일도
+# 동일한 피처 빌드 경로로 다시 작성했다 (build_split 로직이 train.py와 반드시
+# 일치해야 val_split을 정확히 재현할 수 있다 -- 이 파일은 latest_model.pkl을
+# train.py가 학습한 것과 동일한 val_split으로 재평가해 reference와 비교한다).
+from code.train import (
+    process_trackman_features_safe, add_engineered_features, apply_f1_filter,
+    apply_te_residual_features, TE_RESIDUAL_COLS, apply_same_hand, SAME_HAND_COLS,
+    is_trackman64,
+)
 from code.mlp_model import compute_bss
 from code.blend_model import predict_blend_bundle
-from code.trackman_pitcher_features import clean_trackman, add_all_tiers, merge_coarse_pitchmix
+from code.trackman_pitcher_features import merge_coarse_pitchmix
+
 
 def calculate_bss(bundle, X_val, y_val):
     """안전장치가 적용된 BSS 평가 루틴 (CatBoost+MLP 블렌드 번들 기준)"""
@@ -28,50 +35,40 @@ def calculate_bss(bundle, X_val, y_val):
     brier, bss, score = compute_bss(preds, y_val)
     return bss, score
 
+
 def main():
     DATA_DIR = "./open/data"
     TEMP_MODEL_PATH = "./open/temp/latest_model.pkl"
     REF_MODEL_PATH = "./open/reference/best_model.pkl"
 
     df = pd.read_csv(os.path.join(DATA_DIR, "train.csv"))
-    df['top_bottom'] = df['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
+    df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"), encoding="utf-8-sig")
 
-    train_df = df.dropna(subset=[TARGET_COL]).reset_index(drop=True)
+    tr_final, _, _ = process_trackman_features_safe(df, df_trm, is_train_split=True)
+    train_df = tr_final.dropna(subset=[TARGET_COL]).reset_index(drop=True)
 
-    # train.py와 동일한 분할(EXPERIMENTS.md §35 ABS 레짐 시프트, cutoff=7 채택)을 그대로 재현한다.
-    # 학습 = season<2024 + (season==2024 & game_month<7), 검증 = season==2024 & game_month>=7
+    # train.py와 동일한 cutoff=7 분할.
     train_mask = (train_df['season'] < 2024) | ((train_df['season'] == 2024) & (train_df['game_month'] < 7))
     val_mask = (train_df['season'] == 2024) & (train_df['game_month'] >= 7)
 
-    # train.py와 동일하게 트랙맨 tier A + coarse pitchmix 피처를 병합 (holdout=2024,
-    # season==2024는 own-season 트랙맨 클램프) — 검증 스플릿을 정확히 재현하려면 이
-    # 병합도 동일해야 한다.
-    pitcher_map = pd.read_csv("./open/temp/pitcher_map.csv")
-    df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"), encoding="utf-8-sig")
-    df_trm_clean = clean_trackman(df_trm)
-    train_df, _ = add_all_tiers(train_df, df_trm_clean, pitcher_map, list(TRACKMAN_TIER_FEED), holdout=2024)
-    train_df = merge_coarse_pitchmix(train_df, df_trm, holdout=2024)
-
     league_success_mean = train_df.loc[train_mask, TARGET_COL].mean()
     train_df = add_engineered_features(train_df, league_success_mean)
+    train_df = merge_coarse_pitchmix(train_df, df_trm, holdout=2024)
+    train_df = apply_same_hand(train_df)
 
-    features = [col for col in train_df.columns if col not in [ID_COL, TARGET_COL]]
+    # 트랙맨64 제거 (code/train.py 와 동일 — 실전 1117.03 레시피).
+    features = [col for col in train_df.columns
+               if col not in [ID_COL, TARGET_COL] and not is_trackman64(col)]
 
-    # 2024년 7~10월만 학습에서 제외하고 검증셋으로 사용 (3~6월은 학습에 포함됨 — train.py와 동일)
     train_split = train_df.loc[train_mask, features + [TARGET_COL]].reset_index(drop=True)
     val_split = train_df.loc[val_mask, features + [TARGET_COL]].reset_index(drop=True)
     train_split = apply_f1_filter(train_split)
 
-    # target-encoding 잔차 6개(->CatBoost 전용) — train.py와 동일하게 F1 필터된
-    # train_split을 인코딩 소스로 val_split에 적용한다. reference 번들이 이 피처
-    # 도입 이전 구버전이면 predict_blend_bundle이 cat_feature_cols 불일치로 예외를
-    # 던지고, 위의 legacy 분기가 그 경우를 "비교 불가 -> 신규 모델 채택"으로 처리한다.
     te_prior = train_split[TARGET_COL].mean()
     val_split = apply_te_residual_features(train_split, val_split, te_prior)
 
     X_val, y_val = val_split[features + TE_RESIDUAL_COLS], val_split[TARGET_COL].values
 
-    # 1. 신규 최신 임시 버퍼 모델 검증
     with open(TEMP_MODEL_PATH, 'rb') as f:
         latest_bundle = pickle.load(f)
     latest_bss, latest_score = calculate_bss(latest_bundle, X_val, y_val)
@@ -83,7 +80,6 @@ def main():
     print(f" Blend 메타모델: {latest_bundle.get('meta_model')}")
     print("="*60)
 
-    # 2. 기존 최고 Reference 모델과 성능 대조
     ref_bss = -float('inf')
     if os.path.exists(REF_MODEL_PATH):
         with open(REF_MODEL_PATH, 'rb') as f:
@@ -93,19 +89,10 @@ def main():
                 ref_bss, ref_score = calculate_bss(ref_bundle, X_val, y_val)
                 print(f" ➔ 기존 최고 Reference 모델 BSS: {ref_bss:.5f} (점수: {ref_score:.2f})")
             except Exception as e:
-                # 번들 포맷(dict 키)은 현재 스태킹 구조와 같아도, 그 안의 CatBoost/MLP가
-                # 기대하는 피처 스키마(컬럼 구성)가 이번 실행과 다를 수 있습니다 — 예:
-                # 트랙맨 피처 제거/F1 필터 도입처럼 학습 피처 집합 자체가 바뀐 경우.
-                # 이런 스키마 불일치는 예측 단계에서 예외로 드러나므로, 위의 legacy 포맷
-                # 분기와 동일하게 "비교 불가 -> 신규 모델 채택"으로 처리합니다.
                 ref_bss = -float('inf')
                 print(f" ⚠ 기존 Reference 모델의 피처 스키마가 이번 실행과 호환되지 않습니다 ({e}). 비교를 건너뛰고 신규 모델을 채택합니다.")
         else:
-            # CatBoost 단독/MLP 단독 시절의 레거시 번들, 또는 "alpha" 가중평균 시절의
-            # 구 블렌드 번들("meta_model" 키가 없는 버전)은 현재 스태킹 번들 포맷과
-            # 호환되지 않으므로 비교 없이 무시합니다. 이번 실행의 신규 모델이 그대로
-            # NEW_BEST 로 승격되며, dopip.py가 기존 파일을 open/former_model/ 로 자동 백업합니다.
-            print(" ⚠ 기존 Reference 모델이 현재 스태킹 번들 포맷이 아닙니다 (구버전 MLP/CatBoost 단독 또는 alpha 블렌드 레거시로 추정). 비교를 건너뛰고 신규 모델을 채택합니다.")
+            print(" ⚠ 기존 Reference 모델이 현재 스태킹 번들 포맷이 아닙니다. 비교를 건너뛰고 신규 모델을 채택합니다.")
 
     with open("./open/temp/compare_result.txt", "w") as f:
         if latest_bss > ref_bss:
@@ -113,6 +100,7 @@ def main():
         else:
             f.write("KEEP_REF")
     print("✅ 검증 세트 스코어 비교 대조록 갱신 성공.")
+
 
 if __name__ == "__main__":
     main()

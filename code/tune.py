@@ -13,7 +13,7 @@ import optuna
 from catboost import CatBoostClassifier, Pool
 
 from code.catboost_model import CAT_FEATURES
-from code.experiment_residual_correction_9_10 import build_split
+from code.thirdmodel_common import build_split
 
 N_TRIALS = int(os.environ.get("TUNE_TRIALS", 40))
 DATA_DIR = "./open/data"
@@ -29,14 +29,15 @@ def compute_bss(preds, y_val):
 
 
 def build_data():
-    """현재 프로덕션(tier A 포함) 피처/분할 구성으로 CatBoost 튜닝용 Pool을 만든다.
+    """2026-08-25: 현재 프로덕션 피처/분할 구성(F1필터+season진행분+TE-residual+
+    coarse pitchmix, tier A 제거)으로 CatBoost 튜닝용 Pool을 만든다.
 
-    참고: `TIER_FEED = {"a": "mlp"}`는 tier A를 MLP에만 먹이므로, tier A를 완전히
-    제거한 pitchmix-only 후보(EXPERIMENTS.md §43)로 바꿔도 `cat_features`
-    (base_features + PITCHMIX_COLS, tier A 컬럼은 애초에 안 들어감)는 완전히 동일하다
-    — 즉 이 CatBoost 튜닝 결과는 tier A 유무와 무관하게 그대로 유효해서 재실행할
-    필요가 없다."""
-    train_split, val_split, features, cat_features, _mlp_num_cols = build_split(2024, cutoff7=True)
+    이전에는 `code.experiment_residual_correction_9_10.build_split`을 썼는데, 그
+    함수는 TE-residual(2026-08-20 도입, 실전 +13.86 확인)을 아예 호출하지 않는
+    스냅샷이라 CatBoost 튜닝 결과가 TE-residual 6개 컬럼 없이 나온 것이었다 —
+    `code.thirdmodel_common.build_split`(train.py::main()을 그대로 재현, TE-residual
+    포함)로 교체."""
+    train_split, val_split, mlp_num_cols, cat_features = build_split(cutoff7=True)
 
     X_train = train_split[cat_features]
     y_train = train_split[TARGET_COL].values

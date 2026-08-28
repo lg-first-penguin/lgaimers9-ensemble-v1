@@ -94,105 +94,107 @@ def main():
     with open(ref_model_path, 'rb') as f:
         best_bundle = pickle.load(f)
 
-    from code.train import apply_f1_filter, add_engineered_features, apply_te_residual_features, TE_RESIDUAL_COLS, TRACKMAN_TIER_FEED, build_season_end_lookup
-    from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, QUANTILE_N_BINS, embed_dim_for_cardinality, fit_preprocessing, fit_quantile_edges, to_tensors, train_mlp, make_bundle, get_device
-    from code.catboost_model import train_catboost, DEFAULT_FULL_RETRAIN_ITERATIONS
+    # 2026-08-27: 유담님 파이프라인 이식(전면교체) — Full Retrain도 code/train.py와
+    # 동일한 피처 빌드 경로(트랙맨64 물리조인 복원, reverse_rate 시즌진행분 신규,
+    # quantile PLE 제거, CatBoost v2 하이퍼파라미터, MLP/CatBoost 시드 7/5개)로
+    # 다시 작성했다.
+    from code.train import (
+        process_trackman_features_safe, apply_f1_filter, add_engineered_features,
+        apply_te_residual_features, TE_RESIDUAL_COLS, build_season_end_lookup,
+        build_rate_end_lookup, apply_same_hand, SAME_HAND_COLS, is_trackman64,
+        YUDAM_ENSEMBLE_SEEDS, YUDAM_CATBOOST_SEEDS,
+    )
+    from code.mlp_model import CAT_COLS, embed_dim_for_cardinality, fit_preprocessing, to_tensors, train_mlp, make_bundle, get_device
+    from code.catboost_model import train_catboost_ensemble, DEFAULT_FULL_RETRAIN_ITERATIONS
     from code.blend_model import make_blend_bundle
-    from code.trackman_pitcher_features import clean_trackman, add_all_tiers, merge_coarse_pitchmix, PITCHMIX_COLS
+    from code.trackman_pitcher_features import merge_coarse_pitchmix
 
-    # reference 번들이 현재 스태킹 포맷("catboost_model"+"mlp_bundle"+"meta_model")이면 MLP
-    # 멤버별 best_epoch, CatBoost best_iteration, 메타모델 가중치를 그대로 재사용하고,
-    # 구버전/레거시 포맷(alpha 가중평균 시절 포함)이면 전부 기본값으로 재학습합니다.
+    # reference 번들이 현재 유담 레시피 포맷(MLP 7-seed)이면 MLP 멤버별 best_epoch,
+    # CatBoost 시드별 best_iteration, 메타모델 가중치를 그대로 재사용하고, 구버전/
+    # 스키마가 다른 레퍼런스(전면교체 직후 첫 실행 등)면 기본값으로 재학습합니다.
     is_blend_ref = (
         isinstance(best_bundle, dict) and "mlp_bundle" in best_bundle and "catboost_model" in best_bundle
         and "meta_model" in best_bundle
-        and len(best_bundle["mlp_bundle"].get("members", [])) == len(ENSEMBLE_SEEDS)
+        and len(best_bundle["mlp_bundle"].get("members", [])) == len(YUDAM_ENSEMBLE_SEEDS)
     )
     if is_blend_ref:
         per_seed_epochs = [m.get("best_epoch") or DEFAULT_FULL_RETRAIN_EPOCHS for m in best_bundle["mlp_bundle"]["members"]]
-        ref_catboost_best_iteration = best_bundle.get("catboost_best_iteration") or DEFAULT_FULL_RETRAIN_ITERATIONS
+        if best_bundle.get("catboost_best_iterations"):
+            ref_catboost_best_iterations = best_bundle["catboost_best_iterations"]
+        else:
+            single = best_bundle.get("catboost_best_iteration") or DEFAULT_FULL_RETRAIN_ITERATIONS
+            ref_catboost_best_iterations = [single] * len(YUDAM_CATBOOST_SEEDS)
         blend_meta_model = best_bundle["meta_model"]
     else:
-        per_seed_epochs = [DEFAULT_FULL_RETRAIN_EPOCHS] * len(ENSEMBLE_SEEDS)
-        ref_catboost_best_iteration = DEFAULT_FULL_RETRAIN_ITERATIONS
-        # 폴백 기본값 (거의 사용되지 않음 — NEW_BEST가 항상 우선 승격되므로 이 분기는
-        # reference가 이미 호환 포맷일 때만 도달하지 않고, 다음 dopip.py 실행에서
-        # 재학습된 메타모델로 즉시 갱신됨)
+        per_seed_epochs = [DEFAULT_FULL_RETRAIN_EPOCHS] * len(YUDAM_ENSEMBLE_SEEDS)
+        ref_catboost_best_iterations = [DEFAULT_FULL_RETRAIN_ITERATIONS] * len(YUDAM_CATBOOST_SEEDS)
         blend_meta_model = {"w_cat": 1.0, "w_mlp": 1.0, "intercept": 0.0}
+        print("⚠ Reference 번들이 유담 레시피 포맷(MLP 7-seed)이 아닙니다 -- 기본값으로 전체 재학습합니다.")
 
     DATA_DIR = "./open/data"
     train_df_raw = pd.read_csv(os.path.join(DATA_DIR, "train.csv"), encoding="utf-8-sig")
-    train_df_raw['top_bottom'] = train_df_raw['top_bottom'].map({'T': 0, 'B': 1}).astype('int64')
-
-    train_df = train_df_raw.dropna(subset=[TARGET_COL]).reset_index(drop=True)
-
-    # 트랙맨 tier A 피처 병합. holdout=2025로 넘겨 모든 학습 행(season<=2024)이 자기
-    # 시즌까지의 트랙맨을 그대로 보게 한다(cutoff=min(season,2024)=season) — 실제 서빙
-    # (test season=2025, 트랙맨엔 아예 없는 시즌)과 가장 가까운 분포. train.py/test.py의
-    # 검증 단계(holdout=2024, season==2024는 own-season 클램프)와는 의도적으로 다르다.
-    pitcher_map = pd.read_csv("./open/temp/pitcher_map.csv")
     df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"), encoding="utf-8-sig")
-    df_trm_clean = clean_trackman(df_trm)
-    train_df, trk_tier_cols = add_all_tiers(train_df, df_trm_clean, pitcher_map, list(TRACKMAN_TIER_FEED), holdout=2025)
-    trk_mlp_cols = [c for tier, cols in trk_tier_cols.items() if TRACKMAN_TIER_FEED[tier] == "mlp" for c in cols]
-    trk_cat_cols = [c for tier, cols in trk_tier_cols.items() if TRACKMAN_TIER_FEED[tier] == "cat" for c in cols]
 
-    # coarse pitchmix(->CatBoost) 병합. 실전 서빙(test season=2025)은 트랙맨에 전혀 없는
-    # 시즌이므로 holdout=None(전체 2019~2024 트랙맨을 그대로 테이블화)이 실전과 가장
-    # 가까운 분포 — build_lookup_full_history와 동일한 논리. 이 테이블을 submit/model/에
-    # 정적 CSV로 동봉해 submit/script.py가 재계산 없이 그대로 쓰게 한다(pitcher_map.csv와
-    # 동일한 관례).
+    # 트랙맨 상황(10-key) 물리지표 조인. is_train_split=False -> 시간 필터 없이
+    # trackman_history.csv 전체(2019~2024)를 그대로 씀 -- 실전 서빙(test season=2025,
+    # 트랙맨엔 아예 없는 시즌)과 가장 가까운 분포(유담님 full_retrain_blend_f1.py와 동일).
+    tr_final, match_cols, trackman_cols = process_trackman_features_safe(train_df_raw, df_trm, is_train_split=False)
+    train_df = tr_final.dropna(subset=[TARGET_COL]).reset_index(drop=True)
+
     train_df = merge_coarse_pitchmix(train_df, df_trm, holdout=None)
-    trk_cat_cols = trk_cat_cols + PITCHMIX_COLS
-    print(f"[Full Retrain][트랙맨] tier별 피처 수: { {t: len(c) for t, c in trk_tier_cols.items()} }, pitchmix 피처 {len(PITCHMIX_COLS)}개")
+    print(f"[Full Retrain][트랙맨] 물리지표 조인 {len(trackman_cols)}개 컬럼, coarse pitchmix 4개 컬럼")
 
-    from code.trackman_pitcher_features import compute_coarse_pitchmix, COARSE_COLS
-    pitchmix_lookup, _ = compute_coarse_pitchmix(df_trm)
-    pitchmix_lookup_path = "./submit/model/pitchmix_lookup.csv"
-    os.makedirs(os.path.dirname(pitchmix_lookup_path), exist_ok=True)
-    pitchmix_lookup.to_csv(pitchmix_lookup_path, index=False)
-    print(f"[Full Retrain] pitchmix lookup 테이블 저장 완료 -> {pitchmix_lookup_path} ({len(pitchmix_lookup)}개 조합)")
-
-    # 투수/타자 시즌 진행분 lookup (팀원 제보 피처, 2026-08-18 세션 채택) 정적 테이블
-    # 저장. pitchmix_lookup.csv와 동일한 관례 — test.csv(season=2025)는 과거 시즌 행이
-    # 없으므로 이 테이블(전체 2019~2024 기준, season 2025로 키 이동됨)을 재계산 없이
-    # 병합만 한다(code/train.py::build_season_end_lookup 참고).
+    # 투수/타자 시즌 진행분 + reverse_rate 시즌 진행분 정적 lookup 저장 (test.csv는
+    # season=2025뿐이라 과거 시즌 행이 없으므로, 이 테이블들을 한 번 계산해 정적으로
+    # 동봉 -- pitchmix_lookup.csv와 동일 관례).
     season_end_lookup = build_season_end_lookup(train_df)
     season_end_lookup_path = "./submit/model/season_end_lookup.csv"
     season_end_lookup.to_csv(season_end_lookup_path, index=False)
-    print(f"[Full Retrain] 시즌 진행분 lookup 테이블 저장 완료 -> {season_end_lookup_path} ({len(season_end_lookup)}행)")
+    rate_end_lookup = build_rate_end_lookup(train_df)
+    rate_end_lookup_path = "./submit/model/rate_end_lookup.csv"
+    rate_end_lookup.to_csv(rate_end_lookup_path, index=False)
+    print(f"[Full Retrain] 시즌 진행분 lookup 저장 완료 -> {season_end_lookup_path} ({len(season_end_lookup)}행), "
+          f"{rate_end_lookup_path} ({len(rate_end_lookup)}행)")
 
     league_success_mean = train_df[TARGET_COL].mean()
     train_df = add_engineered_features(train_df, league_success_mean)
+    train_df = apply_same_hand(train_df)
     train_df = apply_f1_filter(train_df)
 
-    # target-encoding 잔차 6개(팀원 제보 Track A, ->CatBoost 전용, 2026-08-19 채택).
-    # 제출 모델(submit/script.py)은 test.csv(항상 학습 최대 시즌보다 뒤인 season=2025)를
-    # 추론할 때도 이 causal 함수를 그대로 재사용한다 — 정적 lookup CSV가 따로 필요
-    # 없다(train.csv가 평가 서버 data/ 에도 동봉되므로, league_success_mean과 동일하게
-    # 매 실행 재계산). code/train.py::apply_te_residual_features 문서 참고.
+    # Track A(target-encoding 잔차 6개, ->CatBoost 전용). te_source(F1 필터 적용된
+    # train_df 자신)를 submit/model/te_source.csv로 정적 동봉 -- submit/script.py가
+    # test.csv(2025)에 적용할 때도 이 소스로 causal_smoothed_te_encode를 재사용한다.
     te_prior = train_df[TARGET_COL].mean()
-    train_df = apply_te_residual_features(train_df, train_df, te_prior)
+    te_source_cols = ["pitcher_id", "batter_id", "balls_before", "strikes_before",
+                       "batter_hand", "num_runners_on", "inning", "season", TARGET_COL]
+    te_source = train_df[te_source_cols].copy()
+    te_source_path = "./submit/model/te_source.csv"
+    te_source.to_csv(te_source_path, index=False)
+    print(f"[Full Retrain] TE 소스 테이블 저장 완료 -> {te_source_path} ({len(te_source)}행)")
+    train_df = apply_te_residual_features(te_source, train_df, te_prior)
 
     drop_cols = [ID_COL, TARGET_COL]
-    full_features = [col for col in train_df.columns if col not in drop_cols and col not in TE_RESIDUAL_COLS]
-    num_cols = [c for c in full_features if c not in CAT_COLS and c not in trk_cat_cols]
-    cat_feature_cols = [c for c in full_features if c not in trk_mlp_cols] + TE_RESIDUAL_COLS
+    all_cols = [c for c in train_df.columns if c not in drop_cols]
+    # 트랙맨64 제거 (code/train.py 와 동일 — 실전 1117.03 레시피). 컬럼은 df 에 남기고 모델 입력에서만 제외.
+    cat_feature_cols = [c for c in all_cols if c not in SAME_HAND_COLS and not is_trackman64(c)]
+    num_cols = [c for c in all_cols
+                if c not in CAT_COLS and c not in TE_RESIDUAL_COLS and not is_trackman64(c)]
 
-    print(f"[Full Retrain] 총 {len(train_df)}행 전체 데이터에 대해 {len(ENSEMBLE_SEEDS)}개 시드 앙상블을 재학습합니다. (시드별 epoch: {[e + FULL_RETRAIN_EPOCH_BUFFER for e in per_seed_epochs]})")
+    print(f"[Full Retrain] 총 {len(train_df)}행, CatBoost {len(cat_feature_cols)}개/MLP {len(num_cols)+len(CAT_COLS)}개 피처, "
+          f"{len(YUDAM_ENSEMBLE_SEEDS)}개 시드 MLP 앙상블 재학습. (시드별 epoch: {[e + FULL_RETRAIN_EPOCH_BUFFER for e in per_seed_epochs]})")
 
     full_proc, cat_encoder, num_imputer, num_scaler, cat_dims = fit_preprocessing(train_df, CAT_COLS, num_cols)
     X_full_cat, X_full_num, y_full = to_tensors(full_proc, CAT_COLS, num_cols, TARGET_COL)
     embed_dims = [embed_dim_for_cardinality(d) for d in cat_dims]
-    bin_edges = fit_quantile_edges(X_full_num, n_bins=QUANTILE_N_BINS)
+    # 유담님 순정 레시피: quantile PLE 없음(raw concat) -- bin_edges=None.
 
     device = get_device()
     full_members = []
-    for seed, base_epoch in zip(ENSEMBLE_SEEDS, per_seed_epochs):
+    for seed, base_epoch in zip(YUDAM_ENSEMBLE_SEEDS, per_seed_epochs):
         full_epochs = max(base_epoch, 1) + FULL_RETRAIN_EPOCH_BUFFER
         model, _ = train_mlp(
             X_full_cat, X_full_num, y_full,
-            cat_dims=cat_dims, embed_dims=embed_dims, bin_edges=bin_edges,
+            cat_dims=cat_dims, num_numeric_feats=len(num_cols), embed_dims=embed_dims, bin_edges=None,
             max_epochs=full_epochs, device=device, seed=seed,
         )
         full_members.append({
@@ -204,16 +206,31 @@ def main():
 
     final_mlp_bundle = make_bundle(
         full_members, CAT_COLS, num_cols, cat_dims, embed_dims,
-        cat_encoder, num_imputer, num_scaler, bin_edges=bin_edges,
+        cat_encoder, num_imputer, num_scaler, bin_edges=None,
     )
 
-    catboost_full_iterations = ref_catboost_best_iteration + CATBOOST_ITERATION_BUFFER
-    print(f"[Full Retrain] CatBoost {catboost_full_iterations} iteration 재학습 (reference best_iteration={ref_catboost_best_iteration} + buffer {CATBOOST_ITERATION_BUFFER})")
+    import json
+    with open("./teammate/yudam/model_py311/best_catboost_hparams_v2.json") as f:
+        _tuned = json.load(f)["best_params"]
+    yudam_catboost_params = dict(
+        depth=_tuned["depth"], learning_rate=_tuned["learning_rate"], l2_leaf_reg=_tuned["l2_leaf_reg"],
+        random_strength=_tuned["random_strength"], bagging_temperature=_tuned["bagging_temperature"],
+        border_count=_tuned["border_count"], min_data_in_leaf=_tuned["min_data_in_leaf"],
+        bootstrap_type="Bayesian", loss_function="Logloss", eval_metric="BrierScore",
+    )
+    catboost_full_iterations = [it + CATBOOST_ITERATION_BUFFER for it in ref_catboost_best_iterations]
+    print(f"[Full Retrain] CatBoost(v2 HP) {len(YUDAM_CATBOOST_SEEDS)}-seed 재학습, iteration={catboost_full_iterations} "
+          f"(reference best_iterations={ref_catboost_best_iterations} + buffer {CATBOOST_ITERATION_BUFFER})")
     X_full_raw, y_full_raw = train_df[cat_feature_cols], train_df[TARGET_COL].values
-    final_catboost_model, _ = train_catboost(X_full_raw, y_full_raw, iterations=catboost_full_iterations, verbose=True)
+    catboost_results = train_catboost_ensemble(
+        X_full_raw, y_full_raw, seeds=YUDAM_CATBOOST_SEEDS,
+        per_seed_iterations=catboost_full_iterations, verbose=True, params=yudam_catboost_params,
+    )
+    final_catboost_models = [m for m, _ in catboost_results]
 
-    final_bundle = make_blend_bundle(final_catboost_model, final_mlp_bundle, blend_meta_model, cat_feature_cols=cat_feature_cols)
-    final_bundle["catboost_best_iteration"] = catboost_full_iterations
+    final_bundle = make_blend_bundle(final_catboost_models, final_mlp_bundle, blend_meta_model, cat_feature_cols=cat_feature_cols)
+    final_bundle["catboost_best_iteration"] = catboost_full_iterations[0]
+    final_bundle["catboost_best_iterations"] = catboost_full_iterations
     print(f"[Full Retrain] 최종 블렌드 번들 구성 완료 (meta_model={blend_meta_model})")
 
     FINAL_SUBMIT_MODEL_PATH = "./submit/model/final_retained_model.pkl"

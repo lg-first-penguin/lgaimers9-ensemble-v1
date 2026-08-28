@@ -245,6 +245,9 @@ CatBoost+MLP 2-way 스태킹에 구조적으로 다른 계열(self-attention 기
 32. **"동일 시드인데도 재현이 안 된다"는 이 프로젝트의 MLP 스크리닝에서 오랫동안 "run-to-run 노이즈"(핵심 교훈 #26)로만 뭉뚱그려졌지만, 실은 구체적이고 고칠 수 있는 원인이 있었다 — `nn.Embedding`의 CUDA backward(gradient accumulation의 index_add_/scatter_add_ 연산)가 PyTorch 기본 설정에서 비결정적이다.** `torch.use_deterministic_algorithms(True, warn_only=True)` 한 줄로 완전히 해결됨을 실측 확인했다(§64, baseline 두 번 연속 실행이 725.75/725.75로 diff=0.00·best_epoch까지 일치). "노이즈가 크다"는 진단에서 멈추지 말고 원인을 구체적으로 찾아보면 저비용으로 없앨 수 있는 경우가 있다는 사례 — 이후 신규 MLP 스크리닝 스크립트는 이 한 줄을 기본으로 넣을 것.
 33. **메타모델(스태킹) 검증 fold를 설계할 때 "표본을 키우자"는 목적이 "시간 인과 방향을 지키자"는 원칙을 침범해서는 안 된다 — 랜덤 K-fold는 메타모델이 미래 행으로 과거 행을 맞히는 폴드를 구조적으로 만들어낸다.** 즉흥적인 월별 서브스플릿(폴드 크기가 33k/75k/108k로 들쭉날쭉해 노이즈만 키움, §67.4 1차)을 고치려고 `RepeatedStratifiedKFold` 랜덤 K-fold로 바꿨다가, 이게 실제 배포(과거→미래 예측)와 이 대회 규칙(투구 이전 정보만 사용)의 인과 방향에 정면으로 위배된다는 걸 사용자가 즉시 지적했다(§67.4 2차, 기각). 올바른 해법은 `sklearn.TimeSeriesSplit`으로 "항상 과거 전체 학습 → 다음 시점 구간 검증"을 강제하면서 폴드 수를 늘려(8-fold) 표본 크기 문제를 완화하는 것이었다(§67.4 3차, 확정) — "표본이 작다"는 문제와 "시간 순서를 지켜야 한다"는 제약은 폴드 개수/경계를 잘 설계하면 동시에 만족 가능하며, 둘 중 하나를 위해 다른 하나를 희생해선 안 된다.
 34. **단일 검증 윈도우에서 fit한 3-way(이상) 스태킹 메타모델의 델타는, 완전히 동일한 하이퍼파라미터로 재실행하는 것만으로도 부호가 뒤집힐 수 있다 — 신경망 3rd 모델처럼 그 자체로 높은 분산을 가진 모델일수록 이 위험이 크다.** DeepFM(튜닝판, 7-seed 앙상블)을 정확히 같은 설정으로 두 번 학습시켰더니 solo 점수는 비슷했지만(652.55→656.70) 3-way 스태킹 delta는 +1.87→−7.26으로 완전히 뒤집혔다(§67.3) — MLP의 7-seed 앙상블링이 "단일 모델의 분산이 너무 커서 시드 평균이 필요하다"(핵심 교훈 #4)는 것과 같은 근본 문제가, 3rd 모델을 추가한 스태킹의 "이득이 있다/없다"는 판단 자체에도 그대로 전이된다는 뜻이다. 새 3rd 모델의 스태킹 delta가 근소한 플러스로 나왔다면, 채택 전에 최소 한 번은 완전히 동일한 설정으로 재실행해 그 델타가 재현되는지부터 확인해야 한다 — 재현 안 되면 그 자체가 "노이즈"라는 결론이다.
+35. **메타모델 검증 fold를 아무리 정교하게 설계해도(TimeSeriesSplit 등), 하나의 짧은 윈도우(cutoff7 4개월) 안에서 세분화하는 방식 자체가 "이 변경이 시즌을 넘어 일반화되는가"라는 진짜 질문에는 답하지 못한다 — "노이즈를 줄이는 검증"과 "옳은 질문에 답하는 검증"은 다른 문제다.** 핵심 교훈 #33에서 방법론(인과 방향)을 고친 `TimeSeriesSplit(8-fold)`은 완벽히 유효한 통계 기법이었지만, 폴드 8개 전부가 같은 4개월(2024 7~10월) 안에서만 시간을 쪼갠 것이라 "이 3rd 모델이 다른 해에도 통하는가"라는 원래 질문과는 무관했다 — 사용자가 이 구조적 한계를 지적하고("효용도 없는 검증 왜 하는거야") 폐기, season-level(2020~2024) rolling-origin으로 전환했다(§68.3, §68.5). 폴드 설계에서 "표본이 커지나/인과 방향이 맞나"만 확인하고 "애초에 답하려는 질문과 폴드 경계가 일치하는가"를 놓치면, 방법론적으로 흠 없는 검증도 무가치할 수 있다.
+36. **"CatBoost/MLP와 학습 메커니즘이 근본적으로 다른 3rd 모델"이라는 가설은 옳을 수 있어도, 그 후보의 solo 성능이 프로덕션 대비 너무 약하면(이번 4종 전부 28~61%) 스태킹 이득으로 이어지지 않는다 — 메커니즘의 차이만으로는 부족하고, 최소한의 solo 경쟁력이 동시에 필요하다.** DeepFM(order-2 인수분해)/EBM(cyclic bagging)/BART(베이지안 MCMC)/NAM(피처별 독립 shape function) 4종은 corr(cat)/corr(mlp) 자체는 0.6~0.9대로 낮은 편이었지만(§67.1의 "corr 낮추기"가 아니라 "메커니즘 다르게" 원칙을 충실히 만족), 단일창·재현성체크·season rolling·실전 리더보드 4가지 독립 검증 모두 노이즈 판정으로 수렴했다(§68.6). §50에서 세운 "새로운 메커니즘 없이 재시도 금지" 원칙에 "메커니즘이 달라도 solo가 프로덕션의 절반 이하면 재시도 가치 낮음"이라는 정량적 기준을 추가한다 — 다음에 3rd 모델을 다시 검토한다면, 메커니즘 차별화와 함께 solo 성능이 프로덕션의 최소 70~80%대는 되어야 검증할 가치가 있다고 봐야 한다.
+37. **dual-regime(cutoff7+season==2023) 로컬 검증을 통과하고, 심지어 각 서브모델(CatBoost/MLP) 단독 점수까지 진짜로 개선되는 것("메타모델 재가중치 트릭이 아님", #23의 반례 조건까지 충족)을 확인해도, 실전 리더보드에서 회귀할 수 있다 — 다만 이번 사례는 "로컬 검증이 부족해서"가 아니라 "로컬 검증 자체에 val-leakage 버그가 있어서"였다는 게 확인된, 다른 종류의 실패다.** 투수x타자 페어 상대전적 5개(as-of)는 cutoff7(CatBoost 단독 +25.84/MLP 단독 +20.68, 블렌드 +18.40)과 season==2023(CatBoost +70.99/MLP +67.99, 블렌드 +54.53) 양쪽에서 크고 일관된 개선을 보여 CatBoost 전용으로 채택했고(§69), 프로덕션 로컬 블렌드도 753.37→786.58(+33.21)로 기대와 일치했지만, **실전 리더보드는 1028.75 — 직전 확정 최고 1041.40 대비 −12.65 회귀**였다. 원인을 실제로 찾아보니(사용자의 "Full Retrain이 2024까지 lookup에 포함하나?" 질문이 계기) **로컬 검증 구현 자체의 버그**였다: `apply_pair_matchup_rowlevel`(자체 계산하는 row-level 누적 통계)을 시즌진행분과 같은 패턴으로 "train/val 스플릿 이전 전체 df"에 한 번에 돌렸는데, 시즌진행분과 달리 이건 val 구간 안에서도 계속 누적되는 통계라서 val 행이 "같은 시즌 앞부분에 이미 만난" 페어까지 커버리지에 포함해버렸다(로컬 커버리지 95.3% vs 실제 얼린-lookup 기준 66.06%). TE-residual(`causal_smoothed_te_encode(source_df=train_split, query_df=...)`)은 원래부터 train_split만 source로 쓰고 val엔 그 source의 정적 스냅샷을 적용하는 올바른 패턴이었는데, 페어 매치업은 그 패턴 대신 시즌진행분의 "전체 df에 한 번에" 패턴을 잘못 따라했다 — **"이미 causal해 보이는 자체 계산 통계"라도, 공식 as-of 컬럼을 재사용하는 것(시즌진행분)과 스스로 새 row-level 누적을 계산하는 것(페어 매치업)은 안전한 스플릿 방식이 다르다.** 버그를 고쳐(train_split만 causal source, val_split은 정적 lookup — TE-residual과 동일 구조) 재검증하니 결과가 완전히 뒤집혀 **CatBoost 단독 −43.64를 포함해 모든 feed 방향·모든 지표가 마이너스**로 나왔다(스무딩까지 넣었는데도) — 원래의 "플러스"가 노이즈가 아니라 순수 측정 버그의 산물이었고, 진짜 신호는 처음부터 마이너스였다는 뜻이다. **핵심 교훈**: 자체 계산하는 row-level 누적/as-of 통계를 새로 만들 때는 반드시 "이걸 train/val 스플릿 이전에 한 번에 계산해도 되는가, 아니면 TE-residual처럼 train_split만 source로 쓰고 val/test엔 정적 스냅샷을 적용해야 하는가"를 명시적으로 판단할 것 — 판단 기준은 "이미 공식 as-of 컬럼(대회 측이 제공, 시즌 경계 등 coarse한 스냅샷과만 결합)만 쓰는가" vs "새 축(이번엔 pitcher×batter 페어)으로 스스로 cumcount/cumsum류 누적을 계산하는가"이고, 후자는 항상 TE-residual 패턴을 따라야 한다.
 
 ## 26. MLP 전용 서브피처 스크리닝 — §14.2의 14개 교차 피처, MLP에서도 손해 (기각)
 
@@ -605,3 +608,201 @@ mixup 대신 한 샘플 자신의 표준화된 수치형 입력에 가우시안 
 **최종 결정**: 증거가 노이즈권이라는 걸 명시적으로 재확인한 뒤 **사용자가 실전 데이터 포인트 확보를 위해 DeepFM 3-way 제출을 진행하기로 결정**. `code/build_fm_3way_submit.py`(신규)로 기존 완습된 CatBoost+MLP는 재사용하고 DeepFM만 전체 데이터로 7-seed 재학습(`dopip.py` Full Retrain 관례, 시드당 cutoff7 best_epoch+5buffer), 메타모델은 TimeSeriesSplit 검증에서 가장 일관됐던 `3way_plain`(단순 LogisticRegression) 가중치를 그대로 사용. `submit/script.py`에 DeepFM 추론(3-way 폴백 지원) 추가, 기존 2-way 번들은 `final_retained_model_2way_backup.pkl`로 백업, `submit.zip` 로컬 스모크테스트 통과 후 빌드 완료. **세션 종료 시점까지 실전 리더보드 미확인 — 다음 세션 최우선 확인 사항.**
 
 **다음 세션 과제(중단점)**: (1) 실전 점수 확인 후 3-way 유지/롤백 결정, (2) 2021~2024(전체 연도)+2024 7~10월 rolling-origin 재검증을 4개 후보 전부에 대해 실시(`code/experiment_meta_oof_fit.py` 관례, 아직 착수 전 — fold당 CatBoost+MLP(3-seed)+3rd모델(3-seed) 재학습 필요, 예상 1.5~2시간), (3) NAM 7-seed 앙상블 미실행. 상세 수치·캐시 경로·신규 스크립트 목록: `EXPERIMENTS.md` §67.
+
+## 68. §67 후속 세션 — 실전 결과 확인(노이즈로 확정), season rolling-origin으로 4개 후보 최종 종결
+
+§67의 중단점을 그대로 이어받아 마무리한 세션. **DeepFM 3-way 제출 실전 결과: 1041.83**(직전 2-way 최고 1041.40 대비 +0.43, 노이즈 수준) — §67.3에서 재실행만으로 부호가 뒤집혔던(+1.87→−7.26) 그 불안정성이 실전에서도 그대로 "거의 무효과"로 확인됐다. 같은 시점 팀원이 별도로 CatBoost 하이퍼파라미터만 재탐색한 버전을 제출해 **실전 1044.34**(현재 confirmed 최고)를 기록 — 아직 이 레포엔 미반영.
+
+2-way 메타모델 튜닝(`experiment_meta_tuning.py`)을 재실행해 §67.4 표와 완전히 동일한 값을 재확인(결정론적 fit이라 당연하지만, "재현 안 됨"이 신경망 3rd모델에서만 나타나는 문제임을 대조 확인). 사용자가 `TimeSeriesSplit(n_splits=8)` intra-window 방식 자체를 "효용 없다"며 폐기 지시 — 앞으로 메타모델/3rd모델 검증은 season-level rolling-origin만 쓴다.
+
+EBM/BART 튜닝판을 캐싱 추가해 재실행(§67.3과 완전 동일 재현: EBM 371.59/−28.76, BART 574.27/−2.05), NAM은 이번에 처음 7-seed로 실행(459.65, 3-way delta는 정확히 −0.00 — 메타모델이 가중치를 사실상 버림). 이어서 **2020/2021/2022/2023/2024 season-level rolling-origin**(`code/experiment_thirdmodel_rolling_base.py`+후보별 4개 스크립트, CatBoost/MLP는 fold당 1회만 학습해 공유 캐싱)으로 4개 후보 전부를 재검증 — DeepFM +3.01±12.87(3/5승), EBM +0.02±9.65(3/5승), BART +4.63±11.80(2/5승), NAM +8.12±18.80(3/5승). **넷 다 표준편차가 평균을 2배 이상 압도** — 단일창 검증·재현성 체크·실전 리더보드·season rolling까지 4가지 독립적 방식이 전부 같은 결론(노이즈)에 도달했다. "corr가 높아도 메커니즘이 다르면 스태킹 이득이 있을 수 있다"는 §67.1의 가설 자체는 CatBoost/MLP 사례로 여전히 유효하지만, 이번 4개 후보는 solo 성능이 프로덕션의 28~61%에 그쳐 그 격차를 못 넘었다 — **"메커니즘이 달라도 solo가 프로덕션의 절반 이하면 재시도 가치가 낮다"**는 더 구체적인 기준을 §50의 원칙에 추가한다. 사용자가 프로덕션 결정(3-way 유지 vs 2-way 롤백)은 다음 세션으로 보류하기로 함. 상세: `EXPERIMENTS.md` §68.
+
+## 69. 투수x타자 페어 매치업 — 첫 채택판 실전 회귀(1028.75) → val-leakage 버그 확인 → 수정 후 재검증 결과도 확정 기각
+
+사용자 아이디어("시즌진행분처럼 신박한 피처, 특히 MLP용")로 시작한 투수x타자 as-of 상대전적 5개(`pair_n`/`pair_success_rate`/`pair_rate_gap_*`). cutoff7(블렌드 +41.32, CatBoost 전용 feed 채택)·season==2023(+63.42) 양쪽 dual-regime을 깨끗이 통과하고 서브모델 단독 개선까지 확인해 채택, `dopip.py` 전체 재학습 후 실전 제출 — **실전 리더보드 1028.75, 직전 확정 최고 1041.40 대비 −12.65 회귀**. 사용자가 "코드 무작정 지우진 말고 개선안을 생각해야지"라고 지시, 삭제 대신 원인 규명으로 전환.
+
+사용자의 "Full Retrain이 2024까지 lookup에 포함하나?" 질문을 계기로 근본 원인 발견: `apply_pair_matchup_rowlevel`(자체 계산 row-level 누적 통계)을 시즌진행분과 같은 패턴으로 "train/val 스플릿 이전 전체 df"에 한 번에 돌렸는데, 시즌진행분과 달리 val 구간 안에서도 계속 누적되는 통계라서 val 행이 실전에서는 있을 수 없는 "같은 시즌 앞부분에 이미 만난" 커버리지를 가졌다(로컬 95.3% vs 실제 얼린-lookup 기준 66.06%). TE-residual(`causal_smoothed_te_encode`)은 원래부터 train_split만 source로 쓰는 안전한 패턴이었는데 페어매치업은 그 대신 시즌진행분의 "전체 df 한 번에" 패턴을 잘못 따라했던 것. `train_split`만 causal source로, `val_split`/test엔 `build_pair_matchup_lookup`으로 만든 정적 lookup을 적용하도록 고치고(+ `PAIR_K_SMOOTH=20` empirical-Bayes 스무딩 추가), 재검증하니 결과가 완전히 뒤집혔다 — **CatBoost 단독 −43.64를 포함해 모든 feed 방향·모든 지표가 마이너스**. 원래의 "플러스"는 노이즈가 아니라 순수 측정 버그의 산물이었다. `open/reference/best_model.pkl`/`submit/model/final_retained_model.pkl`을 1041.40 레시피로 롤백, `submit.zip` 재빌드. 코드는 삭제하지 않고 유지, feed만 비활성(`PAIR_COLS`를 `cat_feature_cols`/`num_cols` 어디에도 추가하지 않음). **핵심 교훈 #37**로 기록: 자체 계산 row-level 누적 통계는 반드시 TE-residual 패턴(train_split만 source, val/test는 정적 스냅샷)을 따라야 하고, 시즌진행분의 "전체 df 한 번에" 패턴은 공식 as-of 컬럼만 재사용하는 경우에만 안전하다. 상세: 메모리 `pair_matchup_rejected_val_leakage_bug.md`, `EXPERIMENTS.md`(스크립트 `code/experiment_pair_matchup.py`/`_v2.py`).
+
+## 70. 팀 단위 매치업(pitcher×batter_team_id/batter×pitcher_team_id) — §69 교훈을 반영한 재설계, 4-fold rolling에서 확정 기각
+
+§69 직후 세션. 사용자가 "특정 선수 기준이면 점수가 낮아지는 거네?"라고 물어, "identity 축 전체가 나쁜 게 아니라 pitcher×batter **조합**(최대 657,360가지, 중앙값 표본 12)의 카디널리티가 문제"라고 정리(마킹널 단일-ID 통계인 `asof_pitcher_success_rate`/TE-residual/시즌진행분은 전부 잘 작동 중이므로). 이어서 "35% 미매칭을 중앙값/평균으로 채우면 오르지 않냐"는 질문에는, 이미 EB 스무딩(`PAIR_K_SMOOTH`)이 `pair_n=0`일 때 정확히 `asof_pitcher_success_rate`(개인화 prior)로 수축되므로 median-fill보다 나은 폴백을 이미 썼는데도 안 됐다고 답변.
+
+이를 바탕으로 상대측을 팀(KBO ~10개) 단위로 낮춘 새 피처 2개(`te_p_bteam_res`/`te_b_pteam_res`, pitcher_id×batter_team_id=~7,920 조합)를 설계 — 이번엔 처음부터 §69에서 검증된 안전 패턴(`causal_smoothed_te_encode` 재사용, 시즌 경계 as-of라 시즌-내 리크가 구조적으로 불가능)으로 구현해 val-leakage 버그 재발 여지를 없앴다(`code/train.py::apply_team_matchup_features`). cutoff7(→CatBoost 블렌드 −3.66)과 season==2023(+14.51)이 CatBoost 단독 델타 부호까지 정반대로 뒤집혀(−6.94 vs +28.46), DeepFM류를 닫을 때 쓴 season rolling-origin 타이브레이크를 적용 — 2023/cutoff7(≈2024)은 이미 있으니 2021/2022만 추가(`code/experiment_team_matchup_rolling.py`, R-only, train<val_season). 결과: 2021 −34.27, 2022 −5.48로 역시 마이너스. **4-fold 블렌드 델타(−3.66/+14.51/−34.27/−5.48) 평균 −7.23, 표준편차 17.46 — 2023 한 폴드만 우연히 양수인, §68의 DeepFM/EBM/BART/NAM과 동일한 "1개 lucky fold" 노이즈 패턴.** 확정 기각, feed 비활성 유지(코드는 보존). 이번 결과는 §69와 달리 처음부터 안전한 구현이었으므로 "측정 버그로 위장된 가짜 양성"이 아니라 "정직하게 측정된 진짜 무신호"라는 점에서 더 깨끗한 음성 결과다. 상세: 메모리 `team_matchup_rejected_regime_flip.md`.
+
+## 71. 커리어 다년 궤적(career trajectory) — 지금까지 안 써본 새 축이었으나 dual-regime 통과 후 rolling-origin에서 노이즈로 기각
+
+이번 세션(2026-08-23), "이전 실험 결과를 반영해 새 피처를 탐색해달라"는 요청으로 시작. 먼저 미문서화 상태로 남아있던 최근 세션의 untracked 스크립트들(`code/experiment_walk4_*.py` — 고의사구 오라벨링 재조사, `code/experiment_iqr_outlier_treatment.py`/`_std_outlier_treatment.py`, `code/experiment_te_extra_axes.py`/`_te_pcnt_bhand*.py`, `code/experiment_asof_rate_decomposition.py`, `code/experiment_batter_trackman_identity.py` 등)를 메모리(`intentional_walk_detection_closed.md`, `teammate_catboost_mlp_track_983.md`, `trackB_external_reject_and_new_direction_search.md`)와 대조해, 전부 이미 결론까지 난(기각) 상태임을 확인 — 이 프로젝트가 지금까지 시도한 축(트랙맨 전 형태/3rd-모델 스태킹/MLP 구조 확장·증강/CatBoost 시드·피처 배깅/TE-residual 축 확장/시즌진행분 하위변형/페어·팀 매치업/보정/필터류)을 전수 재확인한 결과, 공식 컬럼 기반으로 남은 "완전히 새로운 축"은 매우 좁혀져 있었다.
+
+시즌진행분(가장 큰 채택 피처, §45)과 TE-residual 축 확장(7/7 기각, `teammate_catboost_mlp_track_983.md`)은 전부 "이번 시즌 하나"를 기준점으로 asof 컬럼을 쪼개는 방식이었다 — 여러 완결된 과거 시즌 "사이"의 변화(연도별 추세)를 보는 축은 이 프로젝트에서 한 번도 시도되지 않았다는 점에 착안해 새 후보를 설계했다: `code/experiment_career_trajectory.py`.
+
+- `{role}_career_trend_1v2` = (시즌 S-1의 "그 시즌만의" 성공률) − (시즌 S-2의 "그 시즌만의" 성공률). 시즌진행분과 동일한 "+1 자기결과 포함" 분해를 모든 과거 시즌에 미리 계산해두고, 현재 행의 시즌 기준 두 시즌 전 값을 차분한다.
+- `{role}_career_experience_seasons` = 현재 시즌 이전 관측된 서로 다른 시즌 수(연차) — `asof_pitcher_n`(누적 투구 수)과 별개로 "몇 년째인가"를 직접 나타내는 컬럼은 지금까지 없었다.
+- lookup은 시즌진행분과 동일하게 스플릿 이전 전체 df에서 계산(각 행이 자기 시즌보다 앞선 시즌만 참조하므로 구조적으로 안전, test.csv/2025에도 그대로 적용 가능한 패턴).
+
+**1단계 dual-regime(CatBoost 단독, 프로덕션 전체 피처셋+4컬럼)**: cutoff7 baseline=706.56→new=707.15(**+0.59**, 거의 평평), season==2023 baseline=716.32→new=748.38(**+32.06**, 큰 플러스) — 두 baseline 모두 알려진 레퍼런스값과 정확히 일치해 구현 정합성 확인. "한쪽은 평평, 한쪽은 큼"이라는 모양이 CatBoost seed-ensemble(cutoff7 +1.51/season2023 +12.23→3-fold 2/3·+3.43로 기각)·li==0 필터(둘 다 플러스였는데도 3-fold 1/3·−10.58로 기각)와 이 세션 값(+32.06)까지 거의 판박이라, 곧바로 rolling-origin으로 에스컬레이션.
+
+**2단계 rolling-origin 3-fold**(`code/experiment_career_trajectory_foldcheck.py`, R-only, train<val_season, val∈{2021,2022,2023}): 2021 −2.20, 2022 −2.26, 2023 +8.57 → **1/3 fold 승리, 평균 delta +1.37.** dual-regime의 +32.06은 검증 윈도우 특유의 우연이었다는 뜻 — **기각.** "새로운 축이라도 dual-regime만으로는 채택 근거가 안 되고 rolling-origin이 반드시 필요하다"는 이 프로젝트의 확립된 규율(핵심 교훈 #28)이 처음 보는 메커니즘에서도 그대로 재현된 사례. feed는 비활성 유지(코드는 재사용 가능하게 보존). 상세: `EXPERIMENTS.md` §71, 메모리 `career_trajectory_rejected_rolling_origin.md`.
+
+이로써 공식 컬럼만으로 시도 가능한 "asof 시계열 분해"류 신규 축은 사실상 소진됐다고 판단된다 — 다음에 유사한 아이디어를 검토할 때는 이 §71과 TE-residual 축 확장(7/7)·시즌진행분 하위변형(2/2 기각)을 먼저 참고할 것.
+
+## 72. CatBoost boosting_type/grow_policy 그리드 — dual-regime 통과했지만 3-seed 재검증에서 기각 (2026-08-25)
+
+§71 이후 "새 피처 축은 소진됐다"는 결론을 사용자가 확인하며 "1,200점대가 대시보드에 실재하니 아직 못 찾은 게 있을 것"이라는 요청으로 갭 분석을 다시 돌렸다(피처가 아니라 모델 구조 쪽 레버를 우선 탐색). `code/catboost_model.py::CATBOOST_PARAMS`를 다시 보니 depth/learning_rate/l2_leaf_reg/random_strength/bagging_temperature/border_count/min_data_in_leaf는 `code/tune.py`(Optuna)로 반복 재탐색됐지만, `boosting_type`(Ordered/Plain)과 `grow_policy`(SymmetricTree/Depthwise/Lossguide)는 한 번도 명시된 적이 없었다 — 기본값 "Auto"는 학습 행 수가 5만 행을 넘으면 자동으로 Plain을 선택하므로, 지금 프로덕션은 사실상 이미 암묵적으로 Plain+SymmetricTree였다. F1 필터로 학습 데이터가 줄어든 지금 Ordered boosting(소표본 과적합에 강함)이나 다른 트리 성장 방식이 이길 수 있는지 스크리닝했다(`code/experiment_catboost_boosting_grid.py`, 프로덕션과 동일한 피처셋/스플릿인 `code/thirdmodel_common.py::build_split` 재사용, 유효 조합은 Ordered는 grow_policy=SymmetricTree만 지원하므로 4개).
+
+**1단계 dual-regime(단일 시드=42)**: Plain+Depthwise/Plain+Lossguide는 cutoff7에서 마이너스(−23.95/−8.64)인데 season==2023에서는 플러스(+23.55/+23.07)로 곧장 부호반전 — 이 프로젝트에 반복적으로 나온 "2023만 좋아 보이는" 패턴이라 즉시 기각. Ordered+SymmetricTree만 두 레짐 모두 플러스(cutoff7 +11.20, season==2023 +12.48)로 1단계를 통과했다.
+
+**2단계 3-seed 재검증(seed=42/123/7, baseline=Plain+SymmetricTree도 같은 시드로 재실행해 페어로 비교)**: season==2023에서는 3/3 승(+12.48/+3.68/+12.76, 평균 +9.64)을 유지했지만, 실제 프로덕션 승격 기준인 cutoff7에서는 1/3 승(+11.20/−17.84/−11.97, 평균 **−6.20**, 표준편차가 평균 절대값보다 큼)으로 뒤집혔다. **기각.** dual-regime 단일 시드 통과가 rolling-origin/multi-seed 재검증을 못 버티는 패턴(핵심 교훈 #28)이 이번엔 "새 피처"가 아니라 "모델 구조 하이퍼파라미터"에서도 그대로 재현됐다 — Ordered boosting이 내부적으로 seed에 따라 다른 데이터 순열(permutation)을 사용하는 메커니즘이 일반 시드보다 seed 민감도를 더 키우는 것으로 보인다. Depthwise/Lossguide는 1단계에서 이미 부호반전으로 기각돼 재검증 없이 종결. `boosting_type`/`grow_policy` 라인 종결 — CatBoost 하이퍼파라미터의 남은 미탐색 구조적 레버는 이제 없다고 봐도 된다. 상세: `EXPERIMENTS.md` §72, 메모리 `catboost_boosting_grid_rejected.md`.
+
+## 73. CatBoost cutoff-diversity 앙상블 — 3-fold 전부 단조 악화로 명확히 기각 (2026-08-25)
+
+§72에서 제안된 세 번째 미탐색 레버: 시드(§54, 노이즈로 기각)·피처 서브셋(feature bagging) 다양성 축은 둘 다 "같은 학습 데이터, 다른 난수"라 얕다는 관찰에서, cutoff sweep(§35.3, weight=1이 cutoff 4~9 전부 CatBoost 단독 플러스인 "산 모양")의 여러 cutoff로 학습한 모델들을 앙상블하면 "학습 데이터 구성 자체가 다른" 더 근본적인 다양성을 얻을 수 있는지 시험했다(`code/experiment_catboost_cutoff_ensemble.py`). 리크 방지를 위해 val_cutoff_month=N 평가 시 모든 멤버의 train_cutoff_month를 N 이하로 제한(멤버 학습 데이터가 val 구간을 절대 포함하지 않도록). season==2023 레짐엔 이 메커니즘(2024년 내부 cutoff 경계)이 구조적으로 적용되지 않으므로, 대신 val_cutoff_month∈{6,7,8}(cutoff 스윕의 "산 모양" 중심부) 3-fold로 rolling-origin 규율(핵심 교훈 #28)을 지켰다.
+
+**결과— 3-fold 전부 멤버를 늘릴수록 단조 악화**:
+
+| fold(val_cutoff) | 2-member | 3-member | 4-member |
+|---|---|---|---|
+| 6 | −3.01 | −13.57 | (멤버 3개뿐) |
+| 7 | +1.61 | −7.21 | −17.61 |
+| 8 | −3.04 | −1.80 | −4.29 |
+
+노이즈가 아니라 구조적 원인이 명확하다 — train_cutoff가 이를수록 학습에 포함되는 2024년 head 데이터가 적어 solo 점수 자체가 더 낮다(예: fold7에서 cutoff=4의 solo Val Score 634.36 < cutoff=7의 706.56). 이런 "덜 학습된" 멤버를 평균에 섞으면 최고 단일 모델(= 현재 프로덕션과 동일한 train_cutoff=val_cutoff 모델)을 그냥 희석시킬 뿐이다. **기각.** 시드 다양성(같은 정보, 다른 관점)과 cutoff 다양성(정보량 자체가 다름)은 근본적으로 다른 축이었다 — "앙상블 멤버는 독립적이되 동등하게 유용해야 한다"는 전제가 애초에 성립하지 않았다. `boosting_type`/`grow_policy`(§72)에 이어 모델 구조 쪽 레버도 소진. 상세: 메모리 `catboost_cutoff_ensemble_rejected.md`.
+
+## 74. 팀원(조유담) 실전 1059.72 레시피 재현 — 하이퍼파라미터/트랙맨64/조합 전부 cutoff7에서 마이너스, 실전 우위 원인 미해결 (2026-08-25)
+
+§72/§73(모델 구조 레버 소진)에 이어 사용자가 팀원의 정확한 레시피 스펙(리더보드 1059.72, 로컬 792.22)을 확보해왔다. 대조 결과 파생피처12/시즌진행분8/TrackA(TE-residual)6/구종비중4는 우리 repo와 컬럼명까지 완전히 동일 — 구조적 차이는 딱 둘: (1) CatBoost 하이퍼파라미터(depth=7/l2_leaf_reg=14.806/border_count=167/min_data_in_leaf=35 등, 우리 값과 전부 다름), (2) `(balls_before, strikes_before, pitcher_hand, batter_hand, inning, top_bottom, season, game_month)` × 구종군별 물리량 mean+std 64개("트랙맨64") — **season이 조인 키에 포함**되며, 팀원 스스로도 "2025 실전에선 매칭 실패 → 트랙맨 자체 평균 fallback"이라 문서화함.
+
+세 스크립트(`experiment_teammate_catboost_hparams.py`/`experiment_teammate_trackman64.py`/`experiment_teammate_combo.py`)로 우리 프로덕션 피처셋에 isolate 이식해 cutoff7로 검증:
+
+| 구성 | Val Score | delta(우리 baseline 706.56 대비) |
+|---|---|---|
+| 하이퍼파라미터만 팀원 | 693.42 | **−13.14** |
+| 트랙맨64만 추가 | 688.62 | **−17.94** (val 매칭률 **0.0%** 실측 확인) |
+| 둘 다 팀원 | 698.71 | **−7.85** (부분 시너지 있으나 여전히 마이너스) |
+
+season==2023에서는 하이퍼파라미터 단독이 +34.15로 크게 좋았다 — cutoff7↔2023 부호반전으로, §72(Ordered+SymmetricTree)와 정확히 같은 "2023만 좋아 보이는" 패턴. **트랙맨64는 val 매칭률 0.0%가 실측으로 확인돼 이론이 아니라 사실로 결론 낼 수 있다: 어떤 미래 시즌에도 이 64컬럼은 100% 상수이므로, 팀원의 실전(test.csv=season2025) 제출에서도 구조적으로 상수였을 수밖에 없다 — 즉 트랙맨64는 팀원의 실전 1059.72에 기여했을 수가 없다(수학적으로).**
+
+**결론**: 우리가 식별한 두 구조적 차이 중 어느 것도(단독이든 조합이든) cutoff7 기준으로 팀원의 실전 우위를 설명하지 못한다. 남은 가설은 (a) 텍스트 설명 재현의 미묘한 구현 차이(TE-residual 스무딩 상수, merge_asof 디테일 등), (b) 팀원의 실제 검증 스플릿 경계가 우리 cutoff7과 다름, (c) MLP 쪽 차이(raw StandardScaler concat vs 우리 quantile/PLE 임베딩, 고정블렌드 0.61/0.39 vs 우리 스태킹 메타모델) — 아직 미검증. **다음 세션 최우선 과제는 팀원의 실제 코드(`feature_engineering.py`/`mlp_model.py`/`full_retrain_blend_f1.py`/`submit/script.py`) 확보** — 텍스트 설명 재현은 한계에 도달했다.
+
+**부수 이슈**: 같은 세션에서 재시도한 MLP Optuna 재탐색(`code/tune_mlp.py`, §44의 중단된 재검증 스레드를 현재 피처셋으로 재시작)이 1시간 넘게(72분 CPU타임) 단 1개 trial도 완료하지 못해 비정상으로 판단, 강제 종료했다 — 원인 미조사. `open/temp/best_mlp_hparams_pitchmix_only.json`은 여전히 2026-08-18 시점 결과(재검증 미완료 상태) 그대로다. 상세: `EXPERIMENTS.md` §74, 메모리 `teammate_1059_recipe_investigation.md`.
+
+## 75. CatBoost Optuna 재탐색(TE-residual 포함) — cutoff7에서 즉시 마이너스, 재탐색 레버 5번째 소진 확인 (2026-08-25)
+
+사용자 요청으로 "새로 추가된 피처 반영한 CatBoost 하이퍼파라미터 재탐색"을 시도. 점검 결과 `code/tune.py`가 쓰던 `experiment_residual_correction_9_10.build_split`은 TE-residual(§67 이전, 2026-08-20 도입)을 아예 호출하지 않는 구식 스냅샷이었다 — 프로덕션 `CATBOOST_PARAMS`는 TE-residual 도입 이후 한 번도 Optuna로 재탐색된 적이 없었다는 뜻이라 재시도할 근거는 있었다. `code/thirdmodel_common.py::build_split`(프로덕션과 동일, TE-residual 포함)로 교체해 40 trials 재실행했다.
+
+Best trial(BSS=701.23, `depth=5/lr=0.0313/l2=8.83/border_count=136/min_data_in_leaf=2`)이 **탐색 대상이던 cutoff7 val 자체에서 이미 프로덕션 baseline(706.56)보다 낮았다** — Optuna 탐색 단계에서부터 이례적으로 이미 마이너스 신호. `code/experiment_catboost_te_retune.py`(신설)로 직접 대조하니 cutoff7 −5.33, season==2023 +11.27 — §43/§45·§72·§74와 완전히 동일한 "cutoff7 마이너스, season==2023만 플러스" 과적합 패턴이 **네 번째**로 재현됐다. cutoff7(프로덕션 승격 기준)이 이미 명확히 마이너스라 멀티시드/블렌드 재검증 없이 기각 확정.
+
+**결론**: 기각, 프로덕션 값 변경 없음. `code/tune.py`의 split 참조는 thirdmodel_common 기준으로 교체된 채 유지(다음 재탐색 시도를 위한 인프라 수정, 이번 결과와는 별개). "CatBoost 하이퍼파라미터를 cutoff7 단일 홀드아웃 기준 Optuna로 재탐색"하는 접근 자체가 이 프로젝트에서 구조적으로 안 통한다는 결론이 5번째 관측(§43/§45/§72/§74/§75)으로 사실상 확정 — 새 피처가 추가될 때마다 재탐색을 재시도할 유인이 계속 줄어든다. 상세: `EXPERIMENTS.md` §75.
+
+## 76. TE-residual 신규 축(타자 플래툰 스플릿) — 여섯 번째 동일 과적합 패턴, cutoff7/season2023 반대 방향 문제가 반복적 배경 신호로 부각 (2026-08-25)
+
+§75 이후 "새 피처 방향 브레인스토밍" 요청으로 기존 TE-residual 축 구성을 재점검 — 투수 쪽은 4개 축(count/batter_hand/runners/inning)으로 세분화·확장 시도까지 있었지만, 타자 쪽은 `te_b_cnt` 하나뿐이고 투수 쪽 `te_p_bhand`의 대칭짝인 "타자 플래툰 스플릿"(batter×pitcher_hand)은 미시도였음을 확인. `code/experiment_te_bphand.py`로 dual-regime 테스트: cutoff7 **-16.40**, season==2023 **+24.78** — §43/§45/§72/§74/§75와 동일한 패턴이 여섯 번째로 재현됐고, 이번엔 하이퍼파라미터가 아니라 완전히 새로운 피처 축인데도 같은 모양이 나와 이 패턴이 레버 종류에 무관하다는 게 재확인됐다. cutoff7 기준 기각.
+
+**주목할 점**: 이번 세션에서 시도한 두 개(§75/§76)를 포함, 최근 시도의 대다수가 이 정확한 부호반전 패턴을 보인다는 게 누적 관찰됐다 — cutoff7과 season==2023 검증 윈도우가 구조적으로 자주 반대 방향 신호를 준다는 뜻일 수 있다. 원인은 아직 조사 안 됨(다음 세션 후보 과제로 기록). 상세: `EXPERIMENTS.md` §76.
+
+## 77. cutoff7↔season==2023 반대방향 신호의 구조적 원인 진단 — 두 가지 확인, cutoff7 우선 관행이 정량적으로 정당화됨 (2026-08-25)
+
+§75/§76에서 연속 재현된(누적 6번째) "cutoff7 마이너스, season==2023만 플러스" 패턴 자체를 사용자 요청으로 진단했다. train.csv를 직접 분석해 두 가지 구조적 원인을 확인:
+
+1. **F1 필터가 season==2023 레짐 train에서 F리그를 완전히 제거**(F비율 정확히 0%, `season<2023`이 전부 F1 필터 대상 `season<=2022`이므로) — 그런데 val(season==2023)엔 F리그가 10.46% 섞여있어, 이 레짐 모델은 한 번도 학습하지 않은 F리그를 예측해야 한다. cutoff7은 train에 2023+2024 F행이 남아 이 문제가 훨씬 약함(F비율 3.41%). CLAUDE.md의 "Known reliability gap" 문단이 다른 제안(train<2023, validate on {2023,2024} 통합)을 기각한 근거와 같은 메커니즘이 지금까지 상시 감사도구로 써온 season==2023 단독 홀드아웃에도 그대로 적용되고 있었음을 이번에 처음 명시 확인.
+
+2. **cutoff7 val이 훈련분포에서 더 멀리 떨어진, 더 어려운 일반화 테스트**: R리그만 비교한 train→val 성공률 이동폭이 cutoff7 -3.32%p vs season==2023 -1.99%p로 cutoff7이 훨씬 큼 — cutoff=7 스플릿을 도입시킨 ABS 레짐시프트(§34-37)의 가장 먼 끝단이 정확히 cutoff7 val 구간이기 때문. season==2023은 상대적으로 같은 레짐 내 보간에 가깝다.
+
+**결론**: 두 원인 모두 "season==2023이 복잡도 추가에 구조적으로 관대하다"는 같은 방향을 가리킨다. 이 프로젝트가 cutoff7을 프로덕션 승격 기준으로 써온 기존 관행이 경험적 휴리스틱이 아니라 구조적으로 정당하다는 게 정량적으로 처음 확인됐다 — 향후 "season==2023만 플러스"인 결과는 두 confound를 기본 설명으로 깔고 시작 가능. 상세: `EXPERIMENTS.md` §77.
+
+### §78. 팀원 CatBoost 하이퍼파라미터 5-seed 재검증 — 기각 확정 (2026-08-26)
+
+조유담 팀이 real 1085.24 → reverse_rate+5seed 추가로 real ~1090까지 올린 걸 확인한 뒤, 사용자가 "우리도 따라가야지"라며 CatBoost 하이퍼파라미터 재탐색 방향을 제안했다. 하지만 이전 두 번의 시도(§74 직접 이식, §75 자체 Optuna 재탐색)가 전부 cutoff7에서 실패했고, 특히 §74는 cutoff7 -13.14/season2023 +34.15로 레짐이 반전됐는데 이게 단일시드 CatBoost의 알려진 노이즈(thread_count만 바꿔도 7~19pt 흔들림) 때문일 수 있다는 의심이 있었다.
+
+그래서 새 Optuna 탐색 대신, 이미 알려진 팀원의 정확한 하이퍼파라미터 값을 우리 프로덕션과 동일한 5-seed CatBoost 앙상블 방식으로 재검증했다(`code/experiment_teammate_catboost_hparams_5seed.py`, thread_count 고정으로 스레드 노이즈까지 통제). 결과: cutoff7 -1.04, season2023 -3.23 — **처음으로 두 레짐이 같은 방향(마이너스)에 동의**했다. 크기는 노이즈 수준이지만 방향 일관성이 핵심 발견 — 이전 단일시드의 레짐반전은 진짜 신호 불일치가 아니라 노이즈였다는 뜻이고, 노이즈를 걷어내면 팀원 하이퍼파라미터는 우리 피처셋에서 이득이 없다는 게 깨끗하게 드러났다.
+
+**결론**: CatBoost 하이퍼파라미터 이식/재탐색 레버는 6번째 실패로 최종 종결. 조유담 팀과의 실전 격차(1043.16 vs 1085.24/~1090)는 하이퍼파라미터가 아니라 다른 구조적 차이(트랙맨64 상수컬럼 유지, MLP quantile PLE 미사용, reverse_rate 등)에서 찾아야 한다는 게 명확해졌다. 상세 수치: `EXPERIMENTS.md` §78.
+
+### §79-81. 팀원(조유담) 파이프라인과의 3가지 구조적 차이 전수 검증 (2026-08-26 야간, 사용자 취침 중 자동 실행)
+
+§78에서 CatBoost 하이퍼파라미터 이식이 최종 기각된 뒤, 사용자가 남은 3가지 구조적 차이(MLP quantile PLE 유무 / 트랙맨 물리량 64컬럼 유지 여부 / reverse_rate 시즌분해)를 "2→1→3 순서로 다 돌려서 정리해놓으라"고 지시하고 취침, 세 실험을 순차 자동 실행했다.
+
+**① quantile PLE (§79)**: cutoff7(프로덕션 기준)에서 MLP solo +48.76/Blend +18.41로 quantile 유지가 명확히 이긴다 — season2023만 Blend가 반전(-17.63)되는데 §77에서 이미 진단한 season2023 자체의 구조적 신뢰도 문제로 설명 가능. **우리가 옳았다, 격차 원인 아님.**
+
+**② 트랙맨64 상수컬럼 (§80)**: 팀원의 `process_trackman_features_safe`(match_cols에 season 포함)를 그대로 재현해 5-seed CatBoost로 검증. val이 시간필터링 구조상 자동으로 100% 미매치(진짜 상수)가 되어 실전 재현이 별도 트릭 없이 자연히 이루어졌다. cutoff7에서 **-49.26**이라는 이 프로젝트 기준 큰 폭의 손해 — 노이즈로 보기 어려운 크기. **우리가 이 방식을 계속 배제해온 게 옳았다, 오히려 팀원에게도 마이너스 요인일 가능성.**
+
+**③ reverse_rate 재검증 (§81)**: 5-seed CatBoost + 3-seed MLP로 재검증하니 Blend가 처음으로 두 레짐 모두 플러스(+0.43/+6.49)에 동의 — 원래의 레짐반전(-13.01/+35.36)이 §78과 같은 단일시드 노이즈 패턴이었을 가능성이 높다. 다만 크기가 작아 확정적이지 않고 서브모델 레벨 방향은 여전히 흔들린다. **기각 근거가 약화됐다 — rolling-origin 재검증 전까지 "재오픈"이지 "채택"은 아니다.**
+
+**종합**: 세 구조적 차이 중 둘(quantile, 트랙맨64)은 우리 기존 판단을 재확인했을 뿐 격차를 설명하지 못했고, 하나(reverse_rate)만 재검토 여지가 생겼다. 다음 세션 최우선 과제는 reverse_rate rolling-origin fold check. 상세 수치: `EXPERIMENTS.md` §79-81.
+
+## 82. 팀원 실전 스코어 귀인 오류 정정 — reverse_rate/하이퍼파라미터 둘 다 격차 원인 아님, `teammate/yudam` 코드 전체 확보 (2026-08-26)
+
+§78-81(하이퍼파라미터 최종기각 + quantile/트랙맨64/reverse_rate 3종 구조차이 검증) 직후, 사용자가 git pull해둔 `teammate/yudam`(조유담 팀 리포 전체 클론)을 읽고 "우리가 손해로 기각한 게 왜 팀원 실전에선 이득이었나"를 분석했다. 1차 답변은 reverse_rate를 주 원인으로 지목했으나 **사용자가 직접 정정**: 실전 1085.24를 낸 `submit_0825.zip`은 reverse_rate/CatBoost멀티시드 미포함 버전("v7+메타모델만") — 이 repo(1043.16)와의 +42점 격차가 이미 reverse_rate 없이 존재했다는 뜻이라, reverse_rate는 그 이후 증분(~+5)만 설명 가능하다.
+
+같은 정정에서 quantile PLE 관련 §79 결론도 불완전했음이 드러났다 — 팀원은 2026-08-16 quantile PLE 도입 후 968.15→879.54로 실전 대폭 회귀를 겪었고 그 뒤로 계속 미사용 중인데, 이건 이 repo의 §79 결론(quantile 유지가 이득)과 상충하는 미해결 교차 파이프라인 모순이다. 재구성 가설(미검증): 팀원이 아직 유지 중인 트랙맨64 상수 fallback 컬럼과 quantile PLE의 상호작용(팀원 자체 진단 스크립트가 quantile의 상수-fallback 취약성을 이미 발견해뒀음) — 이 repo는 트랙맨64가 없어 이 상호작용이 애초에 발생하지 않는다는 설명.
+
+**결론**: 격차의 진짜 원인은 여전히 미확인. reverse_rate·CatBoost 하이퍼파라미터 둘 다 아니라는 것만 이번에 명확해졌다. 다음 최우선 과제 불변 — 팀원의 정확한 베이스 레시피/MLP 아키텍처 스펙(피처 목록이 아니라 모델/학습 디테일). 상세: `EXPERIMENTS.md` §82, 메모리 `teammate_catboost_mlp_track_983.md`/`feedback_check_bundle_timeline_before_attribution.md`.
+
+## 84. 손수연 레시피 재현 — 교차팀 비교 사상 첫 양수 신호(cutoff7 블렌드 +10.63) (2026-08-26)
+
+손수연 팀원이 오늘 실전 1055.08(기존 1003.67 대비 +51.4)의 정확한 조합을 직접 확인해줬다: 본인 CatBoost(트랙맨 std5/gap4 season-1앵커 포함) + 이 repo 자체 MLP(재사용) + 유담님 방식 메타모델. 사용자 요청으로 `code/experiment_sooyun_recipe.py`를 만들어 이 조합을 우리 cutoff7 검증에서 직접 재현했다 — 그의 `.cbm` 모델에서 실제 하이퍼파라미터를 추출하고 그의 피처 엔지니어링 함수를 그대로 이식, MLP는 우리 레퍼런스 번들을 재학습 없이 순수 추론만으로 재사용.
+
+결과: CatBoost 솔로 706.56→713.01(+6.45), 블렌드 753.37→764.00(**+10.63**) — 이 프로젝트가 지금까지 시도한 모든 교차팀(yudam CatBoost HP, 트랙맨64) 이식 테스트 중 **처음으로 뚜렷한 양수**. 특히 그의 레시피는 F1 필터도 안 걸었는데(그의 실제 script.py 그대로 충실 재현) 이 정도가 나왔다는 게 의미가 크다 — F1 필터 단독 효과(~+11)를 상쇄하고도 남는 실질적 이득이라는 뜻.
+
+새로 확인된 구조적 차이: `no_both`(CatBoost도 ID 완전 제거, 우리는 raw로 남김 — 미검증 신규 레버), categorical 8개 선언(우리는 2개뿐), season-1 앵커 트랙맨 std/gap(yudam의 죽은 트랙맨64와 달리 구조적으로 살아있음, 다만 yudam이 이미 이식·기각한 전례).
+
+중요한 제약: season2023은 안 돌렸다 — 재사용한 MLP가 cutoff7 컨벤션(2019~2023 전부 학습)이라 season2023 홀드아웃엔 리크. §77이 이미 cutoff7을 더 신뢰도 높은 기준으로 확인해뒀으니 무게는 있지만, 완전한 dual-regime 확인은 아니다. 다음 우선순위: 멀티시드 재검증 → F1 필터 추가 → season2023 전용 MLP 재학습 + rolling-origin. 상세: `EXPERIMENTS.md` §84, 메모리 `sooyun_catboost_77feat_track.md`.
+
+## 85. 손수연 레시피 멀티시드 재검증 — 블렌드 3/3승 유지되나 폭 축소, F1필터 추가는 기각 (2026-08-26)
+
+§84의 단일시드 결과를 3개 시드(42/123/7) × {F1 미적용/적용}로 재검증. 결과: CatBoost 솔로 단독 개선은 노이즈로 판정(3-seed 평균 699.17, 레퍼런스 706.56보다 **-7.39** — §84의 +6.45는 seed=42가 우연히 높았던 값). 블렌드는 **3/3 전부 레퍼런스보다 높음**(평균 753.37→758.55, **+5.18**) — 부호는 유지됐지만 §84의 +10.63보다 폭이 절반 이하로 줄었다. 이 프로젝트에서 반복돼온 "단일시드 과대추정→멀티시드 축소" 패턴이되, 부호 반전까지는 가지 않은 점이 다른 다수 기각 사례와 다르다.
+
+**F1필터를 그의 레시피에 추가하면 3개 시드 전부 손해**(평균 -10.87) — F1필터가 이 repo 자체 데이터에서 독립 검증된 이득이지만, 그의 나머지 레시피 요소(no_both/wider categorical/season-1 트랙맨 등)와 결합하면 상쇄/역전되는 상호작용이 있는 것으로 보인다(메커니즘 미상). F1필터 추가는 기각, 원본(F1 미적용) 레시피 유지가 맞다.
+
+다음: season2023 재검증(fresh MLP 재학습 필요, 이번 세션은 자원 제약으로 보류) → rolling-origin 3-fold(핵심 교훈 #28, 프로덕션 채택 표준) → 통과 시 요소별 분해. 상세: `EXPERIMENTS.md` §85, 메모리 `sooyun_catboost_77feat_track.md`.
+
+## 86. 손수연/조유담 구조 격리 실험 3종 — TrackA가 핵심 레버로 확정, season2023(F1미적용)은 완전붕괴 (2026-08-26)
+
+사용자가 "손수연 CatBoost+우리 MLP와 조유담 모델 차이"를 물어 조유담 코드를 직접 읽어 확인했다: `no_both`(ID 완전제거)와 wide-categorical(8개 선언) 둘 다 조유담도 안 쓴다(코드 검증 완료, `teammate/yudam/full_retrain_blend_f1.py`) — 이 두 레버는 손수연 고유이고, 조유담 레시피엔 있는데 손수연 레시피엔 없는 건 Track A(TE-residual)다. 자원이 확보된 시점에 사용자가 "실험들 다 해보자"고 지시, 3개 실험을 병렬 실행했다.
+
+**① TrackA를 손수연 레시피에 추가(cutoff7, 3-seed)**: cat 평균 +27.46, blend 평균 **+17.21**(3/3 시드 전부 뚜렷한 개선) — 이 프로젝트 전체에서 가장 강한 로컬 신호. 가설 확인.
+
+**② no_both/wide-categorical을 우리 자신의 F1필터 프로덕션 레시피에 단독 이식(4변형×3-seed)**: 전부 평균은 소폭 양수(+0.45~+3.52)지만 시드별 방향이 섞여 3/3 승리 없음 — 노이즈 수준. combined가 wide_cat 단독보다 오히려 나빠 두 레버가 가산적이지 않음도 확인. ①과 극명히 대조 — 손수연 레시피의 실질 이득은 이 두 레버가 아니었다.
+
+**③ season2023 fresh MLP 재검증(train<2023/val=2023 전용 신규 7-seed MLP)**: 우리 프로덕션(F1필터 있음) blend=734.94 vs 손수연(F1 미적용)+같은MLP cat=**0.00**(완전붕괴)/blend=697.47(-37.48). 이건 CLAUDE.md에 이미 문서화된 F1필터 근거(game_type 관계 2023년 역전, F1필터 없으면 season==2023 홀드아웃에서 붕괴)가 세 번째로 독립 재현된 것. 다만 손수연의 실제 실전 제출(1007.52)은 2019~2024 전체로 학습해 이 함정에 안 걸려 안전 — 이 결과는 "그의 F1-미적용 레시피가 날짜범위 선택에 우리보다 훨씬 취약하다"는 뜻이며, §85의 "F1필터 얹으면 cutoff7에서 손해"와 정면으로 긴장 관계에 있다.
+
+**종합 결론**: 손수연 레시피를 통째로 이식하는 게 아니라, TrackA처럼 개별 레버만 우리 F1필터 있는 프로덕션 레시피에 이식하는 방향이 유일하게 안전·효과적인 경로로 확정됐다. 다음: TrackA를 우리 프로덕션 레시피에 정식 추가해 dual-regime + rolling-origin 재검증. 상세: `EXPERIMENTS.md` §86, 메모리 `sooyun_catboost_77feat_track.md`.
+
+## 87. candidate A(손수연+TrackA+F1) dual-regime 완전통과 + 조유담 전체조합 재현 REJECTED (2026-08-27)
+
+사용자 지시로 두 실험 병렬 실행. **candidate A**(손수연 레시피+TrackA+F1필터, `code/experiment_candidate_dualregime.py`, 3-seed)는 cutoff7 764.00(+10.63, 3/3승)과 season2023 758.87(+23.93, 3/3승)로 **양쪽 레짐 다 견고하게 승리** — 이 프로젝트 교차팀 비교 역사상 가장 강력한 신호. F1필터가 §86-③의 완전붕괴를 확실히 막았다. **candidate B**(프로덕션+season-1트랙맨std5/gap4만)는 season2023에서만 크게 좋고(+17.46) cutoff7에서 약함(+1.96, 방향혼재) — season2023 과대해석 패턴, 채택 근거 약함.
+
+**조유담 전체조합 재현**(그의 정확한 구조적 차이 전부를 하나로 합쳐서, `code/experiment_yudam_full_replica.py`, 3-seed)는 cutoff7 -20.66/season2023 +11.04(불안정)로 **레짐반전 → 상호작용 가설 기각**. 그의 정확한 조합을 통째로 넣어도 이 repo의 프레임워크에선 그의 실전 우위(1085.24)가 재현되지 않는다. quantile 없는 MLP가 양쪽 레짐에서 확연히 약한 게 주 원인으로 보인다. `feature_importance_results.txt` 분석에서 `pitcher_reverse_season_rate`가 그의 CatBoost 2위/MLP 순열중요도 4위로 극히 높다는 게 발견됐는데, 이 repo의 로컬 신호(§81, 약한 양성)와 괴리 — 42점 격차의 유일하게 살아있는 단서로 남는다.
+
+**결론**: 손수연 쪽 격차는 TrackA로 사실상 해결, 조유담 쪽 42점 격차는 여전히 미해결. 상세: `EXPERIMENTS.md` §87, 메모리 `sooyun_catboost_77feat_track.md`/`teammate_catboost_mlp_track_983.md`.
+
+## 88. 조유담 전체조합 재현 실험의 버그 2개 발견+수정 — v2 재실행도 여전히 레짐반전 (2026-08-27)
+
+사용자 질문: "재현이 안 됐는데도 1092점은 실전에서 더 뛰어난 걸 인정해야지, 로컬 검증이 잘못된 걸까?" 답을 추측 대신 `teammate/yudam/`의 실제 최신 코드와 §87 재현 스크립트를 라인 단위로 직접 대조. **재현 스크립트 자체에 버그 2개**를 발견: (1) CatBoost 하이퍼파라미터가 "1059.72 레시피" 시절(reverse_rate/same_hand 이전) 낡은 값을 썼고, 그의 실제 ~1090/1092 번들은 2026-08-26에 145피처 전체 기준으로 재탐색한 신버전(`lr=0.046773, min_data_in_leaf=1, best_iteration=684` 등)을 씀, (2) `same_hand`/`same_hand_advantage`(MLP전용)가 `build_split()`에 없어서 완전히 누락됐음 — 이 repo 프로덕션엔 이미 들어가 있는데 이 재현 스크립트에서만 빠짐.
+
+두 버그 수정 후 재실행: cutoff7 blend 732.71→**737.12**(+4.41, 여전히 프로덕션 대비 -16.25), season2023 blend 745.98→**744.33**(-1.65, 프로덕션 대비 +9.39). **레짐반전 패턴은 그대로 재현**됨(§77 진단과 동일 패턴).
+
+**결론**: 로컬 검증 방법론(cutoff7 우선)은 이번에도 틀리지 않았다 — 지금까지 늘 맞았던 것과 같은 패턴. 틀렸던 건 "재현"의 충실도였다. 버그를 고쳐 격차의 일부는 메웠지만 전부는 아니다 — 아직 발견 못한 구조적 차이가 더 있거나, 정밀 튜닝값이 미세한 구현 차이에 민감한 것으로 보인다. 실전 1092는 여전히 진짜 신호로 신뢰하되(로컬-실전 충돌시 항상 실전 우선), 손 재구현으로는 그 레시피를 로컬로 재현하지 못하고 있다. 다음 단계: 그의 실행 가능한 코드를 직접 이 repo 스플릿에 태우거나, 반대로 이 repo 검증 하네스를 그에게 넘겨 그의 번들을 직접 돌려보는 방향. 상세: `EXPERIMENTS.md` §88, 메모리 `teammate_catboost_mlp_track_983.md`.
+
+## 89. candidate A 실전 제출 확정 — real 1046.56(신기록), 손수연 본인 1055.08보다는 낮음 (2026-08-27)
+
+§87 candidate A(손수연 레시피+TrackA+F1, dual-regime 완전통과)를 사용자 지시로 롤링검증 생략하고 바로 실전 제출. `code/build_candidate_a_bundle.py`로 빌드 — CatBoost는 손수연 83피처+TrackA+F1을 그의 실제 실전 시드(42/123/777/999/2024)로 5-seed 배깅, MLP는 이 repo 기존 20-seed 프로덕션 앙상블 재사용. 빌드 중 메타모델 fit에 전체재학습 MLP(cutoff7 val 리크)를 잘못 써서 blend=2080이라는 깨진 결과가 나온 실제 버그를 발견+수정(레퍼런스 MLP로 교체, blend=769.04로 정상화). 5행 스모크테스트 통과 후 제출.
+
+**실전 결과 1046.56**(+3.40, 신기록)이지만 로컬 신호(+10.63/+23.93)보다 훨씬 작고, TrackA+F1을 더 얹은 이 버전이 손수연 본인의 실전 1055.08보다 오히려 낮다 — 조유담 격차와 같은 성격의 미해결 질문 재확인. `submit/model/`+`submit/script.py`를 candidate A로 승격(구버전은 `open/former_model/submit_pre_candidateA_*.zip` 백업), `open/reference/best_model.pkl`/`code/train.py`/`dopip.py`는 아직 미반영 상태. 상세: `EXPERIMENTS.md` §89, 메모리 `sooyun_catboost_77feat_track.md`.
+
+## 90. 후속 조사(컴팩트) — MLP same_hand stale 버그 발견, 유담팀도 로컬>실전 겪음, 손수연 MLP코드 없음 확인 (2026-08-27)
+
+candidate A 실전 1046.56 확인 후 사용자 지시로 팀원 코드를 다시 직접 대조. 발견: (1) 현재 프로덕션 MLP가 `same_hand`를 빠뜨린 stale 번들(코드는 맞는데 재학습이 안 됨, 미수정), (2) 손수연 저장소엔 MLP 코드가 전혀 없음 확인 — "64피처+12개" 발언은 다른 MLP 사용이 아니라 우리 MLP 피처를 줄이라는 조언이었음(사용자 정정), (3) 유담팀 자신도 실전 제출(`submit_0826b.zip`, real 1092.55)이 로컬 기대치보다 낮게 나와 하이퍼파라미터 재검증에 들어감 — "로컬이 실전을 과대추정"하는 패턴이 이 프로젝트만의 문제가 아니라는 대조군 확보. 유담님 실제 코드(`experiment_meta_refit.py`, 하이퍼파라미터 JSON 경로 한 줄만 v2로 교체)를 우리 데이터에 직접 실행해 그의 보고치 재현 여부 확인 중. 상세: `EXPERIMENTS.md` §90.
+
+## 91. 유담님 코드 그대로 실행 재현 성공 — 우리 재구현판의 버그였음이 최종 확정 (2026-08-27)
+
+`run_yudam_exact_v2hp.py`(그의 실제 검증 스크립트, 하이퍼파라미터 경로 1줄만 교체)를 우리 데이터로 직접 돌린 결과 half_2024(=cutoff7) fold에서 블렌드 815.43(30% eval) — 우리 재구현판(737.12, 버그 수정 후에도 -16.25)을 크게 앞선다. **그의 코드를 그대로 돌리면 재현된다** — §88에서 남았던 격차는 손수연/유담 레시피를 손으로 재이식하는 과정에서 아직 못 찾은 구조적 차이 때문이었다. 이를 근거로 사용자가 "재현 성공 여부와 무관하게 유담 파이프라인 전면 교체"를 지시. 상세: `EXPERIMENTS.md` §91.
+
+## 92. 유담 파이프라인 전면교체 — phase1/2/3 스캔 + 프로덕션 승격 (2026-08-27)
+
+3.7시간짜리 스캔(`teammate/yudam/run_phase123_scan.py`)으로 세 가지를 확인: **Phase1**(정식 시드, val전체 기준) cutoff7 블렌드 821.53(+68.16)/season2023 844.14(+109.20) — 이 프로젝트 역사상 가장 크고 일관된 로컬 이득. **Phase2**(MLP 피처그룹 ablation, 단일시드) 트랙맨64 물리조인·reverse_rate 시즌진행분·시즌진행분(성공률) 모두 양쪽 레짐에서 제거 시 MLP 손해 확인 → 손수연의 "피처 줄이기" 조언은 유담 레시피엔 적용 근거 없음, pruning 보류. **Phase3**(메타모델 방법론) 70/30-fit과 val전체-fit의 계수는 사실상 동일(<0.4pt 차이)하지만, **30%-eval로 점수를 읽는 방식 자체가 매우 노이즈에 취약**(season2023에서 -97pt 저평가) — 앞으로는 val 전체 점수를 신뢰 지표로 쓴다. 종합 결론: 유담님 순정 레시피를 그대로(ablation 미반영) candidate B로 채택, `code/train.py`/`test.py`/`dopip.py`/`submit/script.py` 전면 재작성 후 프로덕션 승격(기존 candidate A는 `open/former_model/submit_pre_yudam_replacement_20260827_040028.zip` 백업). 전체 데이터 Full Retrain은 문서화 직후 백그라운드 착수. 상세: `EXPERIMENTS.md` §92.
+
+## 93. Full Retrain 완료(same_hand 버그 부수적 해결) + coarse_pitchmix ablation 7-seed 재검증 = 노이즈 확정 (2026-08-27)
+
+Full Retrain 완료, `submit/model/final_retained_model.pkl` 스모크테스트 통과·submit.zip 패키징 완료. 부수적으로 §90의 "MLP same_hand 누락" stale 버그가 이번 전면 재구축으로 해결됨(`num_cols`에 정상 포함 확인). 별도로, fork의 candidate A 백업 zip이 덮어쓰기 *이후*에 떠져 실제로는 candidate B와 동일한 내용물이었음을 발견(`submit_candidate_a/` 원본이 남아있어 손실은 없음) — 백업은 반드시 덮어쓰기 직전에 뜨고 사후 md5로 검증해야 한다는 교훈.
+
+사용자가 §92 Phase2에서 유일하게 dual-regime 플러스였던 coarse_pitchmix(MLP제외) 후보를 왜 채택 안 했는지 질문 — 정당한 지적이라 CatBoost 예측 재사용 + MLP만 정식 7-seed로 재검증. 결과: cutoff7 +7.58→**-2.37**(부호반전), season2023 +17.84→**+3.72**(10분의1 이하 축소) — **노이즈로 최종 확정**. 단일시드에서 유일하게 살아남았던 후보마저 다중시드에서 무너져, Phase2 전체가 "pruning 근거 없음"으로 정리된다. candidate B(순정 레시피, ablation 미반영) 유지가 옳았음이 사후 검증됨. 상세: `EXPERIMENTS.md` §93.

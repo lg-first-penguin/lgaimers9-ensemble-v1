@@ -1,4 +1,54 @@
 # code/train.py
+"""2026-08-27 전면 교체: 팀원 조유담님 파이프라인(teammate/yudam/) 기반으로 피처
+엔지니어링·CatBoost 하이퍼파라미터·MLP 구성·메타모델 피팅 방식을 전부 교체했다.
+
+배경: 실전 리더보드에서 유담님 파이프라인(v2 CatBoost HP 포함)이 real 1092.55를
+기록한 반면 이 repo의 최고 기록은 1046.56(candidate A)에 그쳤다. 그의 실제 코드를
+그대로(하이퍼파라미터 파일 경로 1줄만 교체) 우리 데이터로 직접 실행해 재현한 결과
+half_2024 fold(=우리 cutoff7과 동일 정의)에서 블렌드 815.43(30% eval subset)을
+확인, 그의 재현이 실제로 되는 것과 이 repo의 예전 재구현 시도가 버그(구식
+하이퍼파라미터 + same_hand 누락)로 실패했었다는 것 둘 다 확인됐다
+(EXPERIMENTS.md §91). 이번 세션에서 재현 성공 여부와 무관하게 그의 순정 레시피로
+파이프라인을 전면 교체하기로 결정 — code/mlp_model.py, code/catboost_model.py,
+code/blend_model.py는 이미 그의 번들 스키마(catboost_models 리스트/mlp_bundle/
+meta_model dict)와 100% 호환되는 범용 인프라라 변경 없이 재사용한다. 이 파일과
+code/test.py, dopip.py Full Retrain 단계, submit/script.py만 그의 feature_engineering.py
++ full_retrain_blend_f1.py + submit/script.py 기준으로 다시 작성했다.
+
+**이전 code/train.py 대비 제거된 것**: pair_matchup(=팀원과 무관, 이 repo 자체 실험,
+실전 -12.65로 이미 기각됐었는데 코드에 남아 cat_feature_cols에 여전히 피드되고
+있던 leftover — 이번 교체로 청소됨), team_matchup(피드 비활성 상태였던 미검증
+실험, 마찬가지로 제거), tier A/B/C 트랙맨 크로스워크(TRACKMAN_TIER_FEED={}로 이미
+비활성이었음, 완전 제거).
+
+**새로 추가된 것(유담님 레시피에는 있었으나 이 repo 프로덕션엔 없었던 것)**:
+- 트랙맨 상황별 물리 지표 mean/std 전체 조인(구 "tier A류"와 달리 크로스워크 없이
+  상황(10-key) 조인만 사용 — `process_trackman_features_safe`, 구 트랙맨64 컬럼).
+  이 repo는 이 조인을 실전 검증 후 제거했었지만(CLAUDE.md "Trackman history" 참고),
+  유담님은 여전히 유지 중이고 그의 실전 결과가 이 repo보다 높으므로 "재현 성공
+  여부와 무관하게 그대로 이식"이라는 이번 세션 지침에 따라 그대로 포함한다. 이후
+  ablation(phase 2)에서 제거 시 영향을 별도로 측정한다.
+- reverse_rate 시즌 진행분(asof_pitcher_reverse_rate의 시즌 분해, `build_rate_end_lookup`/
+  `apply_rate_progression_features`) — 이 repo에서는 아직 "REOPENED"(미확정) 상태였던
+  것을 유담님은 이미 채택해서 쓰고 있음.
+
+**빠진 것(quantile PLE)**: 유담님 MLP는 QuantileEmbedding(PLE) 없이 표준화된
+수치형을 그대로 concat한다(raw concat) — `code/mlp_model.py::train_ensemble`/
+`make_bundle`에 `bin_edges=None`을 넘기면 그대로 이 경로로 자동 폴백되므로
+mlp_model.py 자체는 수정 불필요. 이 repo는 quantile PLE가 검증된 이득이었지만
+유담님 쪽에서는 과거 실측 회귀(968.15→879.54)가 있어 그대로 뺐다 — "재현
+성공 여부와 무관하게 순정 레시피 그대로" 원칙 적용. quantile PLE를 이 레시피
+위에 다시 얹었을 때 어떻게 되는지는 phase 3에서 별도로 측정한다
+(트랙맨64 fallback-constant와의 상호작용 가설, teammate_catboost_mlp_track_983.md 참고).
+
+**메타모델 피팅 방식**: 기존(창현님/이 repo 컨벤션)은 val 전체로 fit, val 전체로
+점수 산출. 유담님은 val을 다시 70/30으로 나눠 70%로 fit, 30%로 평가한다(진짜
+연속된 신규 데이터가 없어 "홀드아웃 안의 홀드아웃"으로 과적합을 다시 확인하는
+취지). 이번 교체에서는 그의 방식(70/30)을 그대로 따르되, dopip.py의 test.py 비교
+로직(reference 대비 NEW_BEST/KEEP_REF 판정)과의 호환을 위해 val 전체 기준 점수도
+함께 계산해 로그에 남긴다 — 실제 meta_model 계수는 70% 파티션으로 학습한 것을
+채택한다(그의 실전 1092.55가 이 방식으로 학습된 계수를 그대로 썼기 때문).
+"""
 import sys
 import os
 
@@ -10,44 +60,82 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 import pickle
+import re
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
 
-from code.mlp_model import CAT_COLS, ENSEMBLE_SEEDS, QUANTILE_N_BINS, embed_dim_for_cardinality, fit_preprocessing, apply_preprocessing, fit_quantile_edges, to_tensors, train_ensemble, make_bundle, predict_bundle, get_device
-from code.catboost_model import train_catboost, predict_catboost
-from code.blend_model import fit_meta_model, make_blend_bundle
-from code.trackman_pitcher_features import clean_trackman, add_all_tiers, merge_coarse_pitchmix, PITCHMIX_COLS
+from code.mlp_model import CAT_COLS, embed_dim_for_cardinality, fit_preprocessing, apply_preprocessing, to_tensors, train_ensemble, make_bundle, predict_bundle, get_device
+from code.catboost_model import predict_catboost_ensemble, train_catboost_ensemble
+from code.blend_model import make_blend_bundle
+from code.trackman_pitcher_features import merge_coarse_pitchmix, PITCHMIX_COLS
 
-# 트랙맨 pitcher-std 통합, 2026-08-17 세션 최종본 (상세 경위는 code/trackman_pitcher_features.py
-# 모듈 docstring 참고): tier A(투수x구종군)->MLP만 채택. tier B(+압박)/C(+타자손)는 한때
-# cutoff=7 스플릿으로 플러스처럼 보였으나, `clean_trackman()`의 결측치 오필터링 버그를 고쳐
-# 2023(pre-ABS)+cutoff7(ABS) 듀얼체크로 재검증한 결과 B는 CatBoost 단독 점수를 실제로는
-# 깎아먹는 가짜 신호(메타모델 재가중치로 블렌드만 구제됨)였고, C는 2023에서 그냥 마이너스였다
-# — 둘 다 제외. 대신 팀원이 제보한 coarse pitchmix(merge_coarse_pitchmix, ->CatBoost)를
-# 추가해 A+pitchmix 조합으로 2023 +9.57 / cutoff7 +34.43 둘 다 통과 확인 후 채택.
-#
-# 2026-08-18 세션: 위 A+pitchmix 조합이 실전 리더보드 950.81(-31.41, 982.22 대비)로
-# 확인됨. season==2023 레짐 로컬 결과(tier A 있으면 -4.02)와 방향이 일치 — tier A를
-# 빼고 pitchmix만 남긴 구성(pitchmix-only)을 다음 실전 후보로 시험한다. cutoff7
-# 레짐에서는 로컬상 tier A가 여전히 크게 이기지만(§43), 단일-레짐 로컬 검증의
-# 신뢰성 한계(CLAUDE.md "Known reliability gap" 참고)로 실전 증거를 우선한다.
-TRACKMAN_TIER_FEED = {}
+# 유담님 파이프라인의 시드 목록을 그대로 이식(값 자체는 임의, 개수만 그의 레시피와
+# 맞춘다 -- CatBoost 5-seed/MLP 7-seed). 이 repo의 code/mlp_model.py::ENSEMBLE_SEEDS
+# (20개, quantile PLE 채택 이후 다른 검증 경로에서 쓰임)와 별개로 이 파일 전용 상수로 둔다.
+YUDAM_ENSEMBLE_SEEDS = [42, 123, 7, 2024, 99, 555, 31337]
+YUDAM_CATBOOST_SEEDS = YUDAM_ENSEMBLE_SEEDS[:5]
+
+
+def process_trackman_features_safe(df_main, df_trm, is_train_split=True):
+    """`teammate/yudam/feature_engineering.py::process_trackman_features_safe` 이식
+    (수정 없이 그대로). 10-key 상황 지문(season/game_month/dayofweek/inning/
+    top_bottom/balls_before/strikes_before/outs_before 등 df_main과 trackman의
+    공통 컬럼 전부) x pitch_type_group 별 물리 지표(rel_speed/spin_rate/...)
+    mean/std를 조인한다. 이 repo는 한때 이 조인을 제거했었으나(구 "트랙맨64"),
+    유담님은 유지 중이고 그의 실전 결과가 더 높아 "순정 레시피 그대로 이식" 원칙에
+    따라 복원한다 -- phase2 ablation으로 이 repo 데이터에서의 순효과를 별도 검증한다."""
+    df_main_copy = df_main.copy()
+    df_trm_copy = df_trm.copy()
+
+    if is_train_split:
+        max_season = df_main_copy['season'].max()
+        max_month = df_main_copy[df_main_copy['season'] == max_season]['game_month'].max()
+        future_mask = (df_trm_copy['season'] > max_season) | \
+                      ((df_trm_copy['season'] == max_season) & (df_trm_copy['game_month'] > max_month))
+        df_trm_copy = df_trm_copy[~future_mask].reset_index(drop=True)
+
+    match_cols = [c for c in df_main_copy.columns if (c in df_trm_copy.columns) and c != 'row_id']
+
+    df_main_copy['top_bottom'] = df_main_copy['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
+    df_trm_copy['top_bottom'] = df_trm_copy['top_bottom'].map({'Top': 0, 'Bottom': 1}).astype(np.int64)
+
+    grouped = df_trm_copy.groupby(match_cols + ['pitch_type_group', 'auto_pitch_type'])
+    grouped_phase1 = grouped[['rel_speed', 'spin_rate', 'induced_vert_break', 'horz_break', 'extension', 'rel_height', 'rel_side', 'zone_speed']].agg(['mean', 'std'])
+    grouped_phase2 = grouped_phase1.reset_index()
+
+    std_cols = [c for c in grouped_phase2.columns if 'std' in c]
+    grouped_phase2[std_cols] = grouped_phase2[std_cols].fillna(0)
+    grouped_phase2.columns = ['_'.join(c).strip('_') for c in grouped_phase2.columns]
+
+    grouped_phase3 = grouped_phase2.drop(columns='auto_pitch_type')
+    grouped_phase3 = grouped_phase3.groupby(match_cols + ['pitch_type_group']).agg(['mean'])
+
+    pivoted = grouped_phase3.unstack(level='pitch_type_group')
+    pivoted.columns = [f"{c[0]}_{c[1]}_{c[2]}" for c in pivoted.columns]
+    tm_final = pivoted.reset_index()
+    tm_final = tm_final.fillna(0)
+
+    for col in ['batter_hand', 'pitcher_hand']:
+        if col in tm_final.columns:
+            tm_final[col] = tm_final[col].map({'Left': 1, 'Right': 2}).astype(np.int64)
+
+    tr_final = pd.merge(df_main_copy, tm_final, on=match_cols, how='left')
+    new_feature_cols = [c for c in tm_final.columns if c not in match_cols]
+    tr_final[new_feature_cols] = tr_final[new_feature_cols].fillna(tr_final[new_feature_cols].mean())
+
+    return tr_final, match_cols, new_feature_cols
+
 
 def apply_f1_filter(df):
-    """2022년 이하 시즌의 game_type=='F'(퓨처스/2군) 행을 학습에서만 제거.
-
-    2023년부터 F의 제구 성공률이 R(1군)보다 낮아지는 방향으로 관계가 역전됐는데
-    (2022 이전: F가 R보다 최대 +20.5%p 높음 -> 2023~2024: 오히려 -3.0%p 낮음),
-    game_type이 CatBoost 피처 중요도 1위라 이 역전이 학습을 크게 오염시킨다
-    (season==2023 단일 홀드아웃 검증 시 스코어가 0에 가깝게 붕괴). 2023년 이후 F는
-    새 관계가 유효하므로 남긴다 — 전량 제거는 검증에서 더 낮은 점수를 보였다.
-    가중치로 희석하는 방식(2023 이후 F에 2배 가중)도 시도됐으나 조기 종료가 첫 트리에서
-    멈추는 등 실패해, 오염 구간은 제거가 유일한 해법으로 확인됐다 (EXPERIMENTS.md 참고).
-    검증/추론 데이터에는 적용하지 않는다 — 학습 데이터에만 적용한다."""
+    """2022년 이하 시즌의 game_type=='F'(퓨처스/2군) 행을 학습에서만 제거. 이 repo와
+    유담님 양쪽에서 동일하게 검증된 필터라 변경 없음 (원본 docstring 근거는
+    PROJECT_HISTORY.md §16 참고)."""
     before = len(df)
     filtered = df[~((df['game_type'] == 'F') & (df['season'] <= 2022))].reset_index(drop=True)
     print(f"[F1 필터] game_type=='F' & season<=2022 제거: {before} -> {len(filtered)}행 ({before - len(filtered)}행 제거)")
     return filtered
+
 
 SEASON_PROGRESSION_SPECS = [
     ("pitcher", "pitcher_id", "asof_pitcher_n", "asof_pitcher_success_rate"),
@@ -56,34 +144,18 @@ SEASON_PROGRESSION_SPECS = [
 
 
 def build_season_end_lookup(df):
-    """투수/타자별 "시즌 마지막 행" 누적치 정적 lookup 테이블을 만든다 (팀원 제보 피처,
-    2026-08-18 세션 채택). control_success가 있는 학습 데이터(train.csv, 스플릿 이전
-    전체)에서만 계산 가능 — test.csv에는 정답이 없고 과거 시즌 행 자체가 없으므로
-    (test는 항상 season 2025뿐), pitcher_map.csv/pitchmix_lookup.csv와 동일하게 이
-    테이블을 한 번 만들어 정적으로 재사용한다(dopip.py Full Retrain에서 계산해
-    submit/model/season_end_lookup.csv로 동봉, submit/script.py는 재계산 없이 병합만).
-    반환: role별 next_season(해당 시즌의 "다음" 시즌 = 이 값이 적용될 시즌) 키의 DataFrame."""
     tables = []
     for role, id_col, n_col, rate_col in SEASON_PROGRESSION_SPECS:
         idx = df.groupby([id_col, "season"])[n_col].idxmax()
         season_end = df.loc[idx, [id_col, "season", n_col, rate_col, "control_success"]].copy()
         season_end.columns = ["id", "season", "end_n", "end_rate", "end_success"]
-        season_end["season"] = season_end["season"] + 1  # 이 값이 적용되는(=다음) 시즌으로 키 이동
+        season_end["season"] = season_end["season"] + 1
         season_end.insert(0, "role", role)
         tables.append(season_end)
     return pd.concat(tables, ignore_index=True)
 
 
 def apply_season_progression_features(df, lookup):
-    """투수/타자 "시즌 진행분" 8개를 계산한다. asof_{pitcher,batter}_success_rate는
-    커리어 전체 누적값이라 베테랑일수록 최근 시즌 컨디션 신호가 희석되는데, lookup(직전
-    시즌 마지막 행의 누적치)을 시즌 시작 시점 기준값으로 빼서 "이번 시즌만의" 성공률과
-    커리어 누적 성공률 대비 격차(rate_gap)를 분리해낸다. df 자신의 다른 행이나
-    control_success에 의존하지 않으므로 test.csv에도 그대로 안전하게 쓸 수 있다.
-    CatBoost 단독 재검증에서 cutoff7 +34.66 / season==2023 +150.76, 프로덕션 블렌드
-    재검증에서 cutoff7 +35.90 / season==2023 +164.90 — 트랙맨류와 달리 양쪽 레짐·양쪽
-    모델 전부 같은 방향으로 크게 개선되어 채택 (code/experiment_season_progression.py,
-    code/experiment_season_progression_blend.py, EXPERIMENTS.md §45 참고)."""
     df = df.copy()
     for role, id_col, n_col, rate_col in SEASON_PROGRESSION_SPECS:
         lut = lookup.loc[lookup["role"] == role, ["id", "season", "end_n", "end_rate", "end_success"]]
@@ -107,9 +179,44 @@ def apply_season_progression_features(df, lookup):
     return df
 
 
-TE_K_SMOOTH = 200
+RATE_PROGRESSION_SPECS = [
+    ("pitcher_reverse", "pitcher_id", "asof_pitcher_n", "asof_pitcher_reverse_rate"),
+]
 
-# (피처명, 그룹 컬럼, 잔차를 뺄 주효과 컬럼명)
+
+def build_rate_end_lookup(df):
+    """유담님 이식: asof_pitcher_reverse_rate 시즌 진행분 lookup. 이 repo에서는 아직
+    "REOPENED"(미확정) 상태였으나 유담님은 이미 채택해서 쓰고 있어 순정 이식."""
+    tables = []
+    for name, id_col, n_col, rate_col in RATE_PROGRESSION_SPECS:
+        idx = df.groupby([id_col, "season"])[n_col].idxmax()
+        season_end = df.loc[idx, [id_col, "season", n_col, rate_col]].copy()
+        season_end.columns = ["id", "season", "end_n", "end_rate"]
+        season_end["season"] = season_end["season"] + 1
+        season_end.insert(0, "name", name)
+        tables.append(season_end)
+    return pd.concat(tables, ignore_index=True)
+
+
+def apply_rate_progression_features(df, lookup):
+    df = df.copy()
+    for name, id_col, n_col, rate_col in RATE_PROGRESSION_SPECS:
+        lut = lookup.loc[lookup["name"] == name, ["id", "season", "end_n", "end_rate"]]
+        merged = df[[id_col, "season"]].merge(lut, left_on=[id_col, "season"], right_on=["id", "season"], how="left")
+        pre_n = merged["end_n"].fillna(0).values
+        pre_count = (merged["end_n"] * merged["end_rate"]).round().fillna(0).values
+        cum_n = df[n_col].values
+        cum_count = np.round(df[n_col].values * df[rate_col].values)
+        season_n = np.maximum(cum_n - pre_n, 0)
+        season_count = np.maximum(cum_count - pre_count, 0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            season_rate = np.where(season_n > 0, season_count / season_n, np.nan)
+        df[f"{name}_season_rate"] = season_rate
+        df[f"{name}_season_rate_gap"] = season_rate - df[rate_col].values
+    return df
+
+
+TE_K_SMOOTH = 200
 TE_AXES = [
     ("te_p_cnt", ["pitcher_id", "balls_before", "strikes_before"], "p_main"),
     ("te_p_bhand", ["pitcher_id", "batter_hand"], "p_main"),
@@ -122,11 +229,6 @@ TE_RESIDUAL_COLS = [f"{name}_res" for name, *_ in TE_AXES] + ["te_covered"]
 
 
 def causal_smoothed_te_encode(source_df, query_df, group_cols, prior, k=TE_K_SMOOTH):
-    """source_df(F1 필터 적용된 학습 파티션)로 시즌-causal 스무딩 타겟인코딩을 만들어
-    query_df(train_split 자신 또는 val_split)에 적용한다. query_df 행 자신의 시즌보다
-    엄격히 앞선 시즌들의 데이터만 쓴다(`allow_exact_matches=False`가 핵심) — 그래서
-    학습 파티션 자기 자신에 적용해도 self-leakage가 없고, F1 필터가 이미 적용된
-    source_df만 쓰므로 §16 스타일의 F1 오염 재유입도 구조적으로 막힌다."""
     agg = source_df.groupby(group_cols + ["season"])["control_success"].agg(["sum", "count"]).reset_index()
     agg = agg.sort_values("season")
     agg["cum_sum"] = agg.groupby(group_cols)["sum"].cumsum()
@@ -148,14 +250,8 @@ def causal_smoothed_te_encode(source_df, query_df, group_cols, prior, k=TE_K_SMO
 
 
 def apply_te_residual_features(source_df, query_df, prior):
-    """투수/타자 상황별 target-encoding 잔차 6개(팀원 제보 Track A, 2026-08-19 채택)를
-    계산한다. asof_pitcher_success_rate(주효과, 이미 공식 피처)와의 중복을 줄이려고
-    상황별 인코딩에서 주효과(p_main/b_main)를 뺀 잔차만 쓴다. CatBoost에만 먹인다 —
-    MLP에 같이 먹이면 cutoff7에서 MLP 단독이 크게 무너져(-24.51) 블렌드 이득이
-    거의 사라졌지만(-2.38), CatBoost 전용으로 두면 cutoff7 +6.97 / season==2023
-    +20.49로 양쪽 다 플러스였고, rolling-origin 3-fold(2021/2022/2023, R-only,
-    §35 방식으로 F1 트랩 회피) 재검증에서도 3/3 fold 승리·평균 +28.01로 확인됨
-    (code/experiment_target_encoding_residual*.py, EXPERIMENTS.md 참고)."""
+    """Track A (팀원 제보 target-encoding 잔차 6개, CatBoost 전용). 이 repo와 유담님
+    양쪽에서 채택된 피처라 변경 없음."""
     query_df = query_df.copy()
     mains = {}
     covered_any = np.zeros(len(query_df), dtype=np.int64)
@@ -174,14 +270,9 @@ def apply_te_residual_features(source_df, query_df, prior):
 
 
 def add_engineered_features(df, league_success_mean):
-    """asof_* 및 카운트 정보를 조합한 파생 피처를 추가합니다.
-
-    df는 control_success를 포함한 학습 데이터(스플릿 이전 전체)여야 한다 — 시즌
-    진행분 피처가 lookup을 df 자신으로부터 만들기 때문. test.csv(정답 없음, 과거
-    시즌 행도 없음)에는 이 함수를 쓸 수 없다 — submit/script.py는 build_season_end_lookup
-    없이 apply_season_progression_features만 정적 CSV lookup과 함께 인라인 복제해 쓴다."""
     df = df.copy()
     df = apply_season_progression_features(df, build_season_end_lookup(df))
+    df = apply_rate_progression_features(df, build_rate_end_lookup(df))
 
     df['pitcher_recent1_gap'] = df['asof_pitcher_prev1_game_success_rate'] - df['asof_pitcher_success_rate']
     df['pitcher_recent3_gap'] = df['asof_pitcher_prev3_game_success_rate'] - df['asof_pitcher_success_rate']
@@ -209,57 +300,71 @@ def add_engineered_features(df, league_success_mean):
 
     return df
 
+
+SAME_HAND_COLS = ['same_hand', 'same_hand_advantage']
+
+# 트랙맨 상황(10-key) 물리조인 산출물 64컬럼. process_trackman_features_safe 는
+# match_cols 에 season 이 들어가 2025 추론 시 전부 per-column 상수로 붕괴하고, 그 죽은
+# 상수가 CatBoost 를 miscalibrate 한다 (Task 1). 완전제거한 손빌드 제출본이 실전 1117.03
+# (candidate B raw 1092.998 대비 +24.03, repo 최고). 이름 규칙: {metric}_{mean|std}_mean_{group}
+# (8 metric × {mean,std} × {fastball,breaking,offspeed,other}). coarse pitchmix 4컬럼은
+# 별개(투수 identity/season 없는 상황축 집계)라 제외 안 함.
+TRACKMAN64_RE = re.compile(
+    r"^(rel_speed|spin_rate|induced_vert_break|horz_break|extension|rel_height|rel_side|zone_speed)"
+    r"_(mean|std)_mean_(fastball|breaking|offspeed|other)$"
+)
+
+
+def is_trackman64(col):
+    return bool(TRACKMAN64_RE.match(col))
+
+
+def apply_same_hand(df):
+    """MLP 전용 라우팅 — 이 repo와 유담님 양쪽에서 동일하게 채택된 피처."""
+    df = df.copy()
+    df['same_hand'] = (df['pitcher_hand'] == df['batter_hand']).astype(np.int64)
+    df['same_hand_advantage'] = df['pitcher_relative_success'] * df['same_hand']
+    return df
+
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
 def main():
     DATA_DIR = "./open/data"
     target_col = 'control_success'
     df = pd.read_csv(os.path.join(DATA_DIR, "train.csv"))
-    df['top_bottom'] = df['top_bottom'].map({'T': 0, 'B': 1}).astype(np.int64)
+    df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"), encoding="utf-8-sig")
 
-    train_df = df.dropna(subset=[target_col]).reset_index(drop=True)
+    tr_final, match_cols, trackman_cols = process_trackman_features_safe(df, df_trm, is_train_split=True)
+    train_df = tr_final.dropna(subset=[target_col]).reset_index(drop=True)
 
-    # ABS(자동 볼 판정 시스템) 레짐 시프트 가설 검증(EXPERIMENTS.md §35) 결과 채택:
-    # 2024시즌부터 KBO가 ABS를 전면 도입해 2019~2023(구 판정체계) 데이터만으로는
-    # 2024/2025(신 판정체계)를 예측하기 어렵다는 가설을, 학습에 2024 초반(3~6월)을
-    # 일부 포함시켜 검증했다. cutoff=7(7월부터 검증)이 여러 cutoff(4~10) 중 블렌드
-    # 기준 가장 크고 신뢰할 만한 이득(+58.03)을 보여 채택. 가중치(sample_weight)는
-    # 표본이 큰 cutoff에서 오히려 baseline보다 나빠 불채택(weight=1 유지).
+    # cutoff=7 스플릿 (= 유담님의 half_2024 fold와 정의 동일: 2019~2024/06 학습,
+    # 2024/07~10 검증). CLAUDE.md "Train/eval split convention" 참고.
     train_mask = (train_df['season'] < 2024) | ((train_df['season'] == 2024) & (train_df['game_month'] < 7))
     val_mask = (train_df['season'] == 2024) & (train_df['game_month'] >= 7)
-
-    # 트랙맨 pitcher-std 피처(tier A) 병합. holdout=2024로 넘겨 season==2024 행은
-    # 학습/검증 구분 없이 own-season 트랙맨을 못 보게 클램프한다 — 이 스플릿(cutoff=7)으로
-    # 실측 검증한 조건과 정확히 동일하게 맞추기 위함(TRACKMAN_TIER_FEED 주석 참고).
-    pitcher_map = pd.read_csv("./open/temp/pitcher_map.csv")
-    df_trm = pd.read_csv(os.path.join(DATA_DIR, "trackman_history.csv"), encoding="utf-8-sig")
-    df_trm_clean = clean_trackman(df_trm)
-    train_df, trk_tier_cols = add_all_tiers(train_df, df_trm_clean, pitcher_map, list(TRACKMAN_TIER_FEED), holdout=2024)
-    trk_mlp_cols = [c for tier, cols in trk_tier_cols.items() if TRACKMAN_TIER_FEED[tier] == "mlp" for c in cols]
-    trk_cat_cols = [c for tier, cols in trk_tier_cols.items() if TRACKMAN_TIER_FEED[tier] == "cat" for c in cols]
-
-    # coarse pitchmix(볼카운트x손 조합별 구종 비중, ->CatBoost) 병합. 크로스워크가 필요
-    # 없으므로 원본(미클렌징) df_trm을 그대로 쓴다 — clean_trackman이 걸러내는 물리 지표
-    # 이상치와 무관한 컬럼만 쓴다(merge_coarse_pitchmix 문서 참고). holdout=2024로 val
-    # 시즌(2024) 자기 자신의 트랙맨은 테이블 계산에서 제외한다(리크 방지).
-    train_df = merge_coarse_pitchmix(train_df, df_trm, holdout=2024)
-    trk_cat_cols = trk_cat_cols + PITCHMIX_COLS
-
-    print(f"[트랙맨] tier별 피처 수: { {t: len(c) for t, c in trk_tier_cols.items()} }, pitchmix 피처 {len(PITCHMIX_COLS)}개 | MLP행 {len(trk_mlp_cols)}개, CatBoost행 {len(trk_cat_cols)}개")
 
     league_success_mean = train_df.loc[train_mask, target_col].mean()
     train_df = add_engineered_features(train_df, league_success_mean)
 
+    # coarse pitchmix (->CatBoost). holdout=2024로 val 시즌 자기 자신의 트랙맨은 제외.
+    train_df = merge_coarse_pitchmix(train_df, df_trm, holdout=2024)
+
+    train_df = apply_same_hand(train_df)
+
     drop_cols = ['row_id', target_col]
-    features = [col for col in train_df.columns if col not in drop_cols]
-    num_cols = [c for c in features if c not in CAT_COLS and c not in trk_cat_cols]
-    cat_feature_cols = [c for c in features if c not in trk_mlp_cols]
+    all_cols = [c for c in train_df.columns if c not in drop_cols]
+    # 트랙맨64 는 컬럼 자체는 df 에 남기되(모델 입력에서만 제외) CatBoost/MLP 피처목록에서 뺀다.
+    cat_feature_cols = [c for c in all_cols if c not in SAME_HAND_COLS and not is_trackman64(c)]
+    num_cols = [c for c in all_cols
+                if c not in CAT_COLS and c not in TE_RESIDUAL_COLS and not is_trackman64(c)]
 
-    train_split = train_df.loc[train_mask, features + [target_col]].reset_index(drop=True)
-    val_split = train_df.loc[val_mask, features + [target_col]].reset_index(drop=True)
+    train_split = train_df.loc[train_mask, all_cols + [target_col]].reset_index(drop=True)
+    val_split = train_df.loc[val_mask, all_cols + [target_col]].reset_index(drop=True)
     train_split = apply_f1_filter(train_split)
-    print(f"훈련 데이터 (2019~2023 + 2024 3~6월, F1 필터 적용): {len(train_split)} 행 | 검증 데이터 (2024 7~10월): {len(val_split)} 행")
+    print(f"훈련 데이터 (F1 필터 적용): {len(train_split)}행 | 검증 데이터(cutoff7 val): {len(val_split)}행")
 
-    # target-encoding 잔차 6개(팀원 제보 Track A, ->CatBoost 전용) — 인코딩 소스는
-    # F1 필터가 이미 적용된 train_split 자신(apply_te_residual_features 문서 참고).
     te_prior = train_split[target_col].mean()
     te_source = train_split
     train_split = apply_te_residual_features(te_source, train_split, te_prior)
@@ -277,38 +382,75 @@ def main():
     print(f"[Device] {device}")
 
     embed_dims = [embed_dim_for_cardinality(d) for d in cat_dims]
-    bin_edges = fit_quantile_edges(X_tr_num, n_bins=QUANTILE_N_BINS)
+    # 유담님 순정 레시피: quantile PLE 없음 (bin_edges=None -> mlp_model.py가 자동으로
+    # raw-concat 경로로 폴백). 7-seed 앙상블.
     members = train_ensemble(
         X_tr_cat, X_tr_num, y_tr,
-        cat_dims=cat_dims, embed_dims=embed_dims, bin_edges=bin_edges,
+        cat_dims=cat_dims, num_numeric_feats=len(num_cols), embed_dims=embed_dims, bin_edges=None,
         X_val_cat=X_val_cat, X_val_num=X_val_num, y_val=y_val_np,
-        seeds=ENSEMBLE_SEEDS, device=device,
+        seeds=YUDAM_ENSEMBLE_SEEDS, device=device,
     )
-
     mlp_bundle = make_bundle(
         members, CAT_COLS, num_cols, cat_dims, embed_dims,
-        cat_encoder, num_imputer, num_scaler, bin_edges=bin_edges,
+        cat_encoder, num_imputer, num_scaler, bin_edges=None,
     )
 
-    print("\n--- [CatBoost] 블렌딩용 CatBoost 모델 학습 ---")
+    print(f"\n--- [CatBoost] 유담님 v2 재튜닝 하이퍼파라미터, {len(YUDAM_CATBOOST_SEEDS)}-seed 배깅 ---")
+    import json
+    with open("./teammate/yudam/model_py311/best_catboost_hparams_v2.json") as f:
+        _tuned = json.load(f)["best_params"]
+    yudam_catboost_params = dict(
+        depth=_tuned["depth"], learning_rate=_tuned["learning_rate"], l2_leaf_reg=_tuned["l2_leaf_reg"],
+        random_strength=_tuned["random_strength"], bagging_temperature=_tuned["bagging_temperature"],
+        border_count=_tuned["border_count"], min_data_in_leaf=_tuned["min_data_in_leaf"],
+        bootstrap_type="Bayesian", loss_function="Logloss", eval_metric="BrierScore",
+    )
     X_train_raw, y_train_raw = train_split[cat_feature_cols], train_split[target_col].values
     X_val_raw, y_val_raw = val_split[cat_feature_cols], val_split[target_col].values
-    catboost_model, catboost_best_iteration = train_catboost(X_train_raw, y_train_raw, X_val_raw, y_val_raw, verbose=True)
-    print(f"[CatBoost] 학습 완료 (best_iteration={catboost_best_iteration})")
+    catboost_results = train_catboost_ensemble(
+        X_train_raw, y_train_raw, X_val_raw, y_val_raw,
+        seeds=YUDAM_CATBOOST_SEEDS, verbose=True, params=yudam_catboost_params,
+    )
+    catboost_models = [m for m, _ in catboost_results]
+    catboost_best_iterations = [it for _, it in catboost_results]
+    print(f"[CatBoost] {len(catboost_models)}-seed 학습 완료 (best_iterations={catboost_best_iterations})")
 
-    mlp_val_preds = predict_bundle(mlp_bundle, val_split[features], device=device)
-    cat_val_preds = predict_catboost(catboost_model, X_val_raw)
-    w_cat, w_mlp, intercept, blend_score, blend_brier = fit_meta_model(cat_val_preds, mlp_val_preds, y_val_raw)
+    mlp_val_preds = predict_bundle(mlp_bundle, val_split[all_cols], device=device)
+    cat_val_preds = predict_catboost_ensemble(catboost_models, X_val_raw)
+
+    # 유담님 메타모델 피팅 방식: val을 70/30으로 재분할, 70%로 fit. 30%eval과 val전체
+    # 점수를 둘 다 로그로 남긴다(후자는 code/test.py의 기존 레퍼런스 비교값과 직접
+    # 비교하기 위함 -- test.py는 latest_model.pkl을 val 전체로 재평가한다).
+    rng = np.random.RandomState(42)
+    n_val = len(y_val_raw)
+    perm = rng.permutation(n_val)
+    split = int(n_val * 0.7)
+    fit_idx, eval_idx = perm[:split], perm[split:]
+    clf = LogisticRegression()
+    clf.fit(np.column_stack([cat_val_preds[fit_idx], mlp_val_preds[fit_idx]]), y_val_raw[fit_idx])
+    w_cat, w_mlp = (float(c) for c in clf.coef_[0])
+    intercept = float(clf.intercept_[0])
     meta_model = {"w_cat": w_cat, "w_mlp": w_mlp, "intercept": intercept}
-    print(f"[Blend] 스태킹 메타모델 w_cat={w_cat:.3f} w_mlp={w_mlp:.3f} intercept={intercept:.3f} | 블렌드 Val Score: {blend_score:.2f}")
 
-    bundle = make_blend_bundle(catboost_model, mlp_bundle, meta_model, cat_feature_cols=cat_feature_cols)
-    bundle["catboost_best_iteration"] = catboost_best_iteration
+    def _score(pred, y):
+        r = y.mean(); brier = ((pred - y) ** 2).mean(); base = r * (1 - r)
+        return max(0.0, 100000 * (1 - brier / base))
+
+    blend_pred_eval30 = sigmoid(w_cat * cat_val_preds[eval_idx] + w_mlp * mlp_val_preds[eval_idx] + intercept)
+    blend_pred_full = sigmoid(w_cat * cat_val_preds + w_mlp * mlp_val_preds + intercept)
+    print(f"[Blend] 메타모델(70% fit) w_cat={w_cat:.3f} w_mlp={w_mlp:.3f} intercept={intercept:.3f}")
+    print(f"[Blend] 30% eval 점수(유담님 방식)={_score(blend_pred_eval30, y_val_raw[eval_idx]):.2f} | "
+          f"val 전체 점수(이 repo test.py 비교용)={_score(blend_pred_full, y_val_raw):.2f}")
+
+    bundle = make_blend_bundle(catboost_models, mlp_bundle, meta_model, cat_feature_cols=cat_feature_cols)
+    bundle["catboost_best_iteration"] = catboost_best_iterations[0]
+    bundle["catboost_best_iterations"] = catboost_best_iterations
 
     os.makedirs("./open/temp", exist_ok=True)
     with open("./open/temp/latest_model.pkl", 'wb') as f:
         pickle.dump(bundle, f)
-    print(f"✅ Model saved to ./open/temp/latest_model.pkl (mlp best_epoch_avg={mlp_bundle['best_epoch_']}, catboost best_iteration={catboost_best_iteration}, meta_model={meta_model})")
+    print(f"✅ Model saved to ./open/temp/latest_model.pkl (mlp best_epoch_avg={mlp_bundle['best_epoch_']}, catboost best_iterations={catboost_best_iterations}, meta_model={meta_model})")
+
 
 if __name__ == "__main__":
     main()

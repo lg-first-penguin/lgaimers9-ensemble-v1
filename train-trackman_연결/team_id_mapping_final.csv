@@ -1,0 +1,127 @@
+﻿team_mapping_key,season,game_type,train_team_id,train_role_observations,train_games,train_batter_observations,train_pitcher_observations,trackman_team_name,final_forward_team_name_count,final_linked_role_observations,final_linked_games,exact_forward_team_name_count,exact_role_observations,exact_games,final_reverse_train_team_count,team_mapping_status,team_mapping_status_ko,mapping_basis,is_final_bidirectional_unique
+1,2019,F,12,2485,9,1191,1294,MIN_DOO,1,1890,7,1,816,3,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+2,2019,F,13,25786,90,13038,12748,MIN_LGT,1,15672,56,1,8386,30,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+3,2019,F,14,4088,14,2058,2030,MIN_HER,1,1999,7,1,272,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+4,2019,F,15,1586,6,819,767,MIN_LOT,1,1292,5,1,802,3,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+5,2019,F,16,1785,6,859,926,MIN_KIA,1,884,3,1,558,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+6,2019,F,17,4148,14,2065,2083,MIN_HAN,1,3140,11,1,1414,5,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+7,2019,F,18,1605,6,771,834,MIN_SAM,1,1595,6,1,1049,4,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+8,2019,F,19,1716,6,767,949,MIN_NCD,1,1716,6,1,1716,6,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+9,2019,F,20,1665,6,831,834,MIN_KTW,1,564,2,1,564,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+10,2019,F,21,3638,13,1801,1837,MIN_SKW,1,1684,6,1,834,3,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+11,2019,F,22,1449,5,773,676,KBO_POL,1,272,1,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+12,2019,F,23,1621,5,813,808,KBO_ARM,1,636,2,1,361,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+13,2019,R,12,41797,144,21167,20630,DOO_BEA,1,38454,133,1,23521,82,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+14,2019,R,13,42016,144,21047,20969,LG_TWI,1,38171,131,1,26149,92,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+15,2019,R,14,41649,144,21489,20160,KIW_HER,1,36479,127,1,25405,88,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+16,2019,R,15,42805,144,20859,21946,LOT_GIA,1,38667,130,1,23638,80,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+17,2019,R,16,42385,144,21032,21353,KIA_TIG,1,21094,72,1,13634,47,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+18,2019,R,17,42722,144,20874,21848,HAN_EAG,1,37124,126,1,24900,85,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+19,2019,R,18,43236,144,21515,21721,SAM_LIO,1,38744,129,1,25601,87,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+20,2019,R,19,42601,144,21194,21407,NC_DIN,1,39286,133,1,24812,83,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+21,2019,R,20,41968,144,21306,20662,KT_WIZ,1,39116,135,1,23363,82,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+22,2019,R,21,42075,144,21144,20931,SK_WYV,1,39709,136,1,24641,86,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+23,2020,F,12,4893,16,2418,2475,MIN_DOO,1,4311,15,1,1193,4,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+24,2020,F,13,23213,76,12031,11182,MIN_LGT,1,17156,58,1,5501,18,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+25,2020,F,14,5670,18,2730,2940,MIN_HER,1,2298,7,1,602,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+26,2020,F,15,610,2,318,292,MIN_LOT,1,569,2,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+27,2020,F,17,4819,16,2279,2540,MIN_HAN,1,4662,16,1,2446,8,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+28,2020,F,18,801,3,424,377,MIN_SAM,1,791,3,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+29,2020,F,19,919,3,413,506,MIN_NCD,1,909,3,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+30,2020,F,20,940,3,469,471,MIN_KTW,1,918,3,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+31,2020,F,21,4561,15,2131,2430,MIN_SKW,1,2698,9,1,1260,4,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+32,2020,R,12,44484,144,22076,22408,DOO_BEA,1,41229,134,1,23367,76,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+33,2020,R,13,43853,144,22128,21725,LG_TWI,1,40482,134,1,25024,84,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+34,2020,R,14,43769,144,22420,21349,KIW_HER,1,41206,136,1,25403,84,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+35,2020,R,15,43320,144,21800,21520,LOT_GIA,1,40630,135,1,25529,85,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+36,2020,R,16,44426,144,22292,22134,KIA_TIG,1,21896,72,1,16926,56,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+37,2020,R,17,44313,144,21431,22882,HAN_EAG,1,41414,135,1,28562,93,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+38,2020,R,18,44277,144,22008,22269,SAM_LIO,1,41424,136,1,27992,92,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+39,2020,R,19,45121,144,22759,22362,NC_DIN,1,42522,136,1,26707,86,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+40,2020,R,20,44455,144,22959,21496,KT_WIZ,1,41860,136,1,25131,82,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+41,2020,R,21,43730,144,21001,22729,SK_WYV,1,41025,136,1,25985,86,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+42,2021,F,12,3770,13,1825,1945,MIN_DOO,1,3727,13,1,2003,7,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+43,2021,F,13,25861,85,13077,12784,MIN_LGT,1,22077,74,1,8991,31,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+44,2021,F,14,3776,12,1907,1869,MIN_HER,1,1478,5,1,308,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+45,2021,F,15,1834,6,956,878,MIN_LOT,1,1776,6,1,274,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+46,2021,F,16,1447,5,743,704,MIN_KIA,1,899,3,1,288,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+47,2021,F,17,3685,12,1842,1843,MIN_HAN,1,3658,12,1,1147,4,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+48,2021,F,18,1824,6,824,1000,MIN_SAM,1,1819,6,1,1166,4,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+49,2021,F,19,1495,5,710,785,MIN_NCD,1,1489,5,1,916,3,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+50,2021,F,20,1848,6,934,914,MIN_KTW,1,1844,6,1,947,3,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+51,2021,F,21,4497,15,2162,2335,MIN_SSG,1,4435,15,1,1588,6,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+52,2021,F,23,1685,5,881,804,KBO_ARM,1,952,3,1,354,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+53,2021,R,12,43924,144,21761,22163,DOO_BEA,1,41044,135,1,24697,82,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+54,2021,R,13,43486,144,22030,21456,LG_TWI,1,40579,136,1,27801,92,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+55,2021,R,14,44072,144,22402,21670,KIW_HER,1,41519,136,1,21641,71,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+56,2021,R,15,45077,144,22241,22836,LOT_GIA,1,41635,135,1,23747,77,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+57,2021,R,16,44157,144,21782,22375,KIA_TIG,1,21850,72,1,14566,49,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+58,2021,R,17,45226,144,22378,22848,HAN_EAG,1,42343,136,1,24480,79,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+59,2021,R,18,43807,145,21751,22056,SAM_LIO,1,41288,137,1,23743,79,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+60,2021,R,19,43640,144,21295,22345,NC_DIN,1,40784,136,1,20622,70,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+61,2021,R,20,43751,145,22732,21019,KT_WIZ,1,40989,137,1,22335,74,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+62,2021,R,21,45314,144,22855,22459,SSG_LAN,1,42709,136,1,20864,67,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+63,2022,F,12,5178,18,2452,2726,MIN_DOO,1,4732,17,1,273,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+64,2022,F,13,30448,104,15383,15065,MIN_LGT,1,20269,74,1,3599,13,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+65,2022,F,14,5161,17,2644,2517,MIN_HER,1,1644,6,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+66,2022,F,15,1694,6,861,833,MIN_LOT,1,860,3,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+67,2022,F,16,1790,6,896,894,MIN_KIA,1,749,3,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+68,2022,F,17,5016,17,2423,2593,MIN_HAN,1,4036,14,1,278,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+69,2022,F,18,1787,6,869,918,MIN_SAM,1,1721,6,1,859,3,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+70,2022,F,19,1484,5,715,769,MIN_NCD,1,1388,5,1,288,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+71,2022,F,20,1736,6,893,843,MIN_KTW,1,1718,6,1,1099,4,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+72,2022,F,21,5125,18,2501,2624,MIN_SSG,1,3232,13,1,802,3,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+73,2022,F,23,1477,5,811,666,KBO_ARM,1,189,1,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+74,2022,R,12,43485,144,21048,22437,DOO_BEA,1,39558,131,1,27935,93,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+75,2022,R,13,42806,144,21888,20918,LG_TWI,1,38542,130,1,24308,82,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+76,2022,R,14,43676,144,22108,21568,KIW_HER,1,40521,134,1,22577,74,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+77,2022,R,15,42697,144,20765,21932,LOT_GIA,1,38168,130,1,21832,74,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+78,2022,R,16,44061,144,22258,21803,KIA_TIG,1,19740,65,1,12667,42,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+79,2022,R,17,44507,144,22095,22412,HAN_EAG,1,39240,128,1,21024,69,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+80,2022,R,18,43698,144,21524,22174,SAM_LIO,1,37661,126,1,20288,67,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+81,2022,R,19,43656,144,21587,22069,NC_DIN,1,39965,133,1,24516,82,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+82,2022,R,20,42591,144,22235,20356,KT_WIZ,1,38159,130,1,22104,75,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+83,2022,R,21,42871,144,21516,21355,SSG_LAN,1,36834,125,1,18135,62,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+84,2023,F,12,4571,16,2278,2293,MIN_DOO,1,3683,14,1,438,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+85,2023,F,13,25686,89,12917,12769,MIN_LGT,1,21273,76,1,6833,25,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+86,2023,F,14,3616,12,1750,1866,MIN_HER,1,3542,12,1,1756,6,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+87,2023,F,15,1665,6,839,826,MIN_LOT,1,731,3,1,288,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+88,2023,F,16,1668,6,831,837,MIN_KIA,1,915,3,1,604,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+89,2023,F,17,3740,14,1897,1843,MIN_HAN,1,3695,14,1,1769,7,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+90,2023,F,18,1420,5,713,707,MIN_SAM,1,1368,5,1,538,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+91,2023,F,19,1414,5,650,764,MIN_NCD,1,1394,5,1,530,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+92,2023,F,20,1177,4,610,567,MIN_KTW,1,1105,4,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+93,2023,F,21,4028,13,1995,2033,MIN_SSG,1,3890,13,1,910,3,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+94,2023,F,23,2387,8,1206,1181,KBO_ARM,1,950,3,0,0,0,1,consistent_final_only,최종 연결에서만 일대일·exact 근거 없음,final_linked_rows_consistency,True
+95,2023,R,12,44027,144,21885,22142,DOO_BEA,1,39913,131,1,27261,90,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+96,2023,R,13,44054,144,22240,21814,LG_TWI,1,41257,135,1,27676,93,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+97,2023,R,14,44100,144,22197,21903,KIW_HER,1,41381,135,1,27399,90,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+98,2023,R,15,44227,144,21941,22286,LOT_GIA,1,40261,131,1,25214,84,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+99,2023,R,16,43408,144,21698,21710,KIA_TIG,1,21318,70,1,15337,50,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+100,2023,R,17,44683,144,22328,22355,HAN_EAG,1,41931,135,1,27484,91,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+101,2023,R,18,43709,144,21574,22135,SAM_LIO,1,38596,128,1,26077,88,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+102,2023,R,19,43807,144,21866,21941,NC_DIN,1,41009,135,1,31093,102,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+103,2023,R,20,43095,144,22423,20672,KT_WIZ,1,41056,137,1,27197,92,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+104,2023,R,21,44568,144,21687,22881,SSG_LAN,1,42428,137,1,27800,90,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+105,2024,F,12,4629,16,2171,2458,MIN_DOO,1,4355,15,1,2398,8,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+106,2024,F,13,30010,101,14975,15035,MIN_LGT,1,25028,85,1,12496,41,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+107,2024,F,14,4868,16,2343,2525,MIN_HER,1,4501,15,1,2188,7,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+108,2024,F,15,1483,5,668,815,MIN_LOT,1,1137,4,1,654,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+109,2024,F,16,1862,6,877,985,MIN_KIA,1,719,3,1,281,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+110,2024,F,17,4990,17,2590,2400,MIN_HAN,1,4729,16,1,1843,6,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+111,2024,F,18,942,4,475,467,MIN_SAM,1,756,3,1,525,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+112,2024,F,19,1685,6,858,827,MIN_NCD,1,1440,5,1,1440,5,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+113,2024,F,20,1907,6,1028,879,MIN_KTW,1,1906,6,1,620,2,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+114,2024,F,21,4908,16,2559,2349,MIN_SSG,1,4856,16,1,2230,7,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+115,2024,F,23,2152,7,1174,978,KBO_ARM,1,629,2,1,317,1,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+116,2024,F,25,584,2,292,292,,0,0,0,0,0,0,0,unresolved_no_final_link,현재 Trackman 연결 근거 없음,,False
+117,2024,R,12,45088,144,22133,22955,DOO_BEA,1,40541,130,1,27911,91,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+118,2024,R,13,44768,144,22571,22197,LG_TWI,1,42324,136,1,31821,103,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+119,2024,R,14,43445,144,21889,21556,KIW_HER,1,40361,134,1,27485,91,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+120,2024,R,15,44944,144,22457,22487,LOT_GIA,1,41148,131,1,26944,87,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+121,2024,R,16,44785,144,22313,22472,KIA_TIG,1,22272,71,1,13387,43,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+122,2024,R,17,44652,144,22133,22519,HAN_EAG,1,40879,132,1,28940,94,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+123,2024,R,18,44536,144,22194,22342,SAM_LIO,1,41056,133,1,26020,85,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+124,2024,R,19,45224,144,22947,22277,NC_DIN,1,42379,135,1,29674,95,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+125,2024,R,20,44738,145,22877,21861,KT_WIZ,1,41890,136,1,25945,84,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
+126,2024,R,21,44814,145,21983,22831,SSG_LAN,1,41938,136,1,28443,93,1,confirmed_exact,exact 경기에서 확정,exact_full10_sequence,True
