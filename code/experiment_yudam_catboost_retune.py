@@ -34,7 +34,7 @@ from code.mlp_model import compute_bss
 from code.train import YUDAM_CATBOOST_SEEDS
 
 N_TRIALS = int(os.environ.get("TUNE_TRIALS", 24))
-OUT_PATH = "/tmp/claude-1000/-home-user-contest-mlp-lgaimers9/64d8ecb5-0a28-4eef-9550-ce16083f96e8/scratchpad/catboost_retune_result.json"
+OUT_PATH = "./scratchpad/catboost_retune_result.json"
 TUNE_FOLDS = ["cutoff7", "2022"]
 GATE_FOLDS = ["cutoff7", "2022", "2023"]
 

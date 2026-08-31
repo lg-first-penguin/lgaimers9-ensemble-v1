@@ -69,6 +69,13 @@ def make_blend_bundle(catboost_model, mlp_bundle, meta_model, cat_feature_cols=N
 def predict_blend_bundle(bundle, df, device=None):
     cat_feature_cols = bundle.get("cat_feature_cols")
     cat_df = df[cat_feature_cols] if cat_feature_cols is not None else df
+    # cat_team 번들: 학습때 team_id 를 categorical(str)로 넣었으면 추론도 동일 캐스팅
+    extra_cat = bundle.get("catboost_extra_cat", [])
+    if extra_cat:
+        cat_df = cat_df.copy()
+        for _c in extra_cat:
+            if _c in cat_df.columns:
+                cat_df[_c] = cat_df[_c].astype(str)
     if "catboost_models" in bundle:
         cat_preds = predict_catboost_ensemble(bundle["catboost_models"], cat_df)
     else:

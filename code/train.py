@@ -303,6 +303,25 @@ def add_engineered_features(df, league_success_mean):
 
 SAME_HAND_COLS = ['same_hand', 'same_hand_advantage']
 
+# 2026-08-31: pitcher_team_id / batter_team_id 를 CatBoost categorical 로 선언(str 캐스팅).
+# 카디널리티 ~10 + 팀당 ~13만 행이라 ordered target-statistic 이 raw-numeric 분할을 이긴다.
+# 로컬 blend cutoff7 +5.53 / 2023 +2.47 (실전near 두 레짐 +), 실전 리더보드 1117.03 -> 1126.77
+# (+9.74). 원본 데이터에서 두 컬럼 모두 int64 라 CatBoost 자동감지가 안 되므로 명시 선언 필요.
+# MLP 쪽은 그대로 임베딩 유지 (빼면 cutoff7 -14~-31). submit/script.py 는 bundle 의
+# catboost_extra_cat 키를 보고 추론 시 같은 str 캐스팅을 한다.
+CATBOOST_EXTRA_CAT = ['pitcher_team_id', 'batter_team_id']
+CATBOOST_CAT_FEATURES = ['game_type', 'base_state'] + CATBOOST_EXTRA_CAT
+
+
+def cast_catboost_cat(df, cat_feature_cols):
+    """CATBOOST_EXTRA_CAT 컬럼을 str 로 캐스팅(학습/추론 표현 일치). game_type/base_state
+    는 원래 object 라 손대지 않는다."""
+    df = df.copy()
+    for c in CATBOOST_EXTRA_CAT:
+        if c in cat_feature_cols and c in df.columns:
+            df[c] = df[c].astype(str)
+    return df
+
 # 트랙맨 상황(10-key) 물리조인 산출물 64컬럼. process_trackman_features_safe 는
 # match_cols 에 season 이 들어가 2025 추론 시 전부 per-column 상수로 붕괴하고, 그 죽은
 # 상수가 CatBoost 를 miscalibrate 한다 (Task 1). 완전제거한 손빌드 제출본이 실전 1117.03
@@ -405,11 +424,15 @@ def main():
         border_count=_tuned["border_count"], min_data_in_leaf=_tuned["min_data_in_leaf"],
         bootstrap_type="Bayesian", loss_function="Logloss", eval_metric="BrierScore",
     )
-    X_train_raw, y_train_raw = train_split[cat_feature_cols], train_split[target_col].values
-    X_val_raw, y_val_raw = val_split[cat_feature_cols], val_split[target_col].values
+    cb_cat_features = [c for c in CATBOOST_CAT_FEATURES if c in cat_feature_cols]
+    X_train_raw = cast_catboost_cat(train_split[cat_feature_cols], cat_feature_cols)
+    y_train_raw = train_split[target_col].values
+    X_val_raw = cast_catboost_cat(val_split[cat_feature_cols], cat_feature_cols)
+    y_val_raw = val_split[target_col].values
     catboost_results = train_catboost_ensemble(
         X_train_raw, y_train_raw, X_val_raw, y_val_raw,
         seeds=YUDAM_CATBOOST_SEEDS, verbose=True, params=yudam_catboost_params,
+        cat_features=cb_cat_features,
     )
     catboost_models = [m for m, _ in catboost_results]
     catboost_best_iterations = [it for _, it in catboost_results]
@@ -445,6 +468,7 @@ def main():
     bundle = make_blend_bundle(catboost_models, mlp_bundle, meta_model, cat_feature_cols=cat_feature_cols)
     bundle["catboost_best_iteration"] = catboost_best_iterations[0]
     bundle["catboost_best_iterations"] = catboost_best_iterations
+    bundle["catboost_extra_cat"] = list(CATBOOST_EXTRA_CAT)
 
     os.makedirs("./open/temp", exist_ok=True)
     with open("./open/temp/latest_model.pkl", 'wb') as f:

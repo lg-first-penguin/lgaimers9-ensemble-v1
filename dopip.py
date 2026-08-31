@@ -102,6 +102,7 @@ def main():
         process_trackman_features_safe, apply_f1_filter, add_engineered_features,
         apply_te_residual_features, TE_RESIDUAL_COLS, build_season_end_lookup,
         build_rate_end_lookup, apply_same_hand, SAME_HAND_COLS, is_trackman64,
+        CATBOOST_EXTRA_CAT, CATBOOST_CAT_FEATURES, cast_catboost_cat,
         YUDAM_ENSEMBLE_SEEDS, YUDAM_CATBOOST_SEEDS,
     )
     from code.mlp_model import CAT_COLS, embed_dim_for_cardinality, fit_preprocessing, to_tensors, train_mlp, make_bundle, get_device
@@ -221,16 +222,20 @@ def main():
     catboost_full_iterations = [it + CATBOOST_ITERATION_BUFFER for it in ref_catboost_best_iterations]
     print(f"[Full Retrain] CatBoost(v2 HP) {len(YUDAM_CATBOOST_SEEDS)}-seed 재학습, iteration={catboost_full_iterations} "
           f"(reference best_iterations={ref_catboost_best_iterations} + buffer {CATBOOST_ITERATION_BUFFER})")
-    X_full_raw, y_full_raw = train_df[cat_feature_cols], train_df[TARGET_COL].values
+    cb_cat_features = [c for c in CATBOOST_CAT_FEATURES if c in cat_feature_cols]
+    X_full_raw = cast_catboost_cat(train_df[cat_feature_cols], cat_feature_cols)
+    y_full_raw = train_df[TARGET_COL].values
     catboost_results = train_catboost_ensemble(
         X_full_raw, y_full_raw, seeds=YUDAM_CATBOOST_SEEDS,
         per_seed_iterations=catboost_full_iterations, verbose=True, params=yudam_catboost_params,
+        cat_features=cb_cat_features,
     )
     final_catboost_models = [m for m, _ in catboost_results]
 
     final_bundle = make_blend_bundle(final_catboost_models, final_mlp_bundle, blend_meta_model, cat_feature_cols=cat_feature_cols)
     final_bundle["catboost_best_iteration"] = catboost_full_iterations[0]
     final_bundle["catboost_best_iterations"] = catboost_full_iterations
+    final_bundle["catboost_extra_cat"] = list(CATBOOST_EXTRA_CAT)
     print(f"[Full Retrain] 최종 블렌드 번들 구성 완료 (meta_model={blend_meta_model})")
 
     FINAL_SUBMIT_MODEL_PATH = "./submit/model/final_retained_model.pkl"

@@ -349,6 +349,13 @@ def main():
     if cat_feature_cols is not None:
         X_test_cb = X_test_cb[cat_feature_cols]
 
+    # cat_team 번들: 학습때 team_id 를 categorical(str) 로 넣었으므로 추론도 동일 캐스팅
+    _extra_cat = bundle.get("catboost_extra_cat", [])
+    if _extra_cat:
+        X_test_cb = X_test_cb.copy()
+        for _c in _extra_cat:
+            if _c in X_test_cb.columns:
+                X_test_cb[_c] = X_test_cb[_c].astype(str)
     catboost_models = bundle.get("catboost_models") or [bundle["catboost_model"]]
     cat_preds = np.mean([m.predict_proba(X_test_cb)[:, 1] for m in catboost_models], axis=0)
 

@@ -19,3 +19,7 @@ CLAUDE.md
 
 # 모델
 open/former_model
+
+# 세션 스크래치패드
+scratchpad/
+submit_*.zip
