@@ -200,10 +200,21 @@ def build_split(regime="cutoff7", add_features_fn=None, drop_cols=None, apply_f1
 
 
 def run_experiment(train_split, val_split, num_cols, cat_feature_cols, all_cols,
-                   mlp_seeds=None, cb_seeds=None, label="", verbose=True):
+                   mlp_seeds=None, cb_seeds=None, label="", verbose=True,
+                   cb_cat_features=None, cb_params_extra=None):
     """raw-concat MLP(bin_edges=None) + v2 CatBoost 를 학습하고 val 전체로 채점한다.
     메타모델은 val 전체 fit + val 전체 채점(이 repo 관례, EXPERIMENTS.md 숫자와 직접 비교).
-    반환: dict(cat_solo, mlp_solo, blend, w_cat, w_mlp, intercept, cb_best_iters)."""
+    반환: dict(cat_solo, mlp_solo, blend, w_cat, w_mlp, intercept, cb_best_iters).
+
+    cb_cat_features : CatBoost categorical 피처 목록 override. 기본 None 이면
+        code/catboost_model.py 의 CAT_FEATURES(game_type, base_state)만 = 1117 레시피.
+        실전 프로덕션(cat_team, 1126.77) 베이스라인 위에서 재검증하려면
+        ['game_type','base_state','pitcher_team_id','batter_team_id'] 를 넘긴다.
+        int64 인 team_id 컬럼은 프로덕션과 동일하게 .astype(str) 캐스팅한다
+        (cat_feature_cols 에 실제로 있는 것만; MLP 쪽 val_split 은 건드리지 않음).
+    cb_params_extra : v2 HP dict 에 병합할 추가 CatBoost 파라미터
+        (예: {'monotone_constraints': {'asof_pitcher_success_rate': 1, ...}}).
+    """
     mlp_seeds = list(mlp_seeds) if mlp_seeds is not None else list(YUDAM_ENSEMBLE_SEEDS)
     cb_seeds = list(cb_seeds) if cb_seeds is not None else list(YUDAM_CATBOOST_SEEDS)
     device = get_device()
@@ -227,14 +238,28 @@ def run_experiment(train_split, val_split, num_cols, cat_feature_cols, all_cols,
                              cat_encoder, num_imputer, num_scaler, bin_edges=None)
     mlp_val = predict_bundle(mlp_bundle, val_split[all_cols], device=device)
 
+    cb_params = _yudam_catboost_params()
+    if cb_params_extra:
+        cb_params = {**cb_params, **cb_params_extra}
+    cb_cat = ([c for c in cb_cat_features if c in cat_feature_cols]
+              if cb_cat_features else None)
+
+    def _cb_frame(df):
+        X = df[cat_feature_cols]
+        if cb_cat:
+            recast = {c: X[c].astype(str) for c in cb_cat if str(X[c].dtype) != "object"}
+            if recast:
+                X = X.assign(**recast)
+        return X
+
     cb_results = train_catboost_ensemble(
-        train_split[cat_feature_cols], train_split[TARGET].values,
-        val_split[cat_feature_cols], val_split[TARGET].values,
-        seeds=cb_seeds, verbose=False, params=_yudam_catboost_params(),
+        _cb_frame(train_split), train_split[TARGET].values,
+        _cb_frame(val_split), val_split[TARGET].values,
+        seeds=cb_seeds, verbose=False, params=cb_params, cat_features=cb_cat,
     )
     cb_models = [m for m, _ in cb_results]
     cb_best_iters = [it for _, it in cb_results]
-    cat_val = predict_catboost_ensemble(cb_models, val_split[cat_feature_cols])
+    cat_val = predict_catboost_ensemble(cb_models, _cb_frame(val_split))
 
     _, _, cat_solo = compute_bss(cat_val, y_val)
     _, _, mlp_solo = compute_bss(mlp_val, y_val)
